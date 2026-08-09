@@ -29,6 +29,7 @@ function App() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [toast, setToast] = useState('')
   const [deletingBid, setDeletingBid] = useState(null)
+  const [undoingSale, setUndoingSale] = useState(null)
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
@@ -104,6 +105,16 @@ function App() {
           event: '*',
           schema: 'public',
           table: 'team_pool_balances',
+          filter: `pool_id=eq.${pool.id}`
+        },
+        loadPool
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'auction_results',
           filter: `pool_id=eq.${pool.id}`
         },
         loadPool
@@ -268,6 +279,11 @@ function App() {
   }
 
   async function sold() {
+    if (!current?.leader_team_id) {
+      notify('Player has no winning team')
+      return
+    }
+
     const { error } = await supabase.rpc('sell_current_player', {
       p_pool_id: pool.id
     })
@@ -281,6 +297,11 @@ function App() {
   }
 
   async function unsold() {
+    if (!current?.current_player_id) {
+      notify('No live player')
+      return
+    }
+
     const { error } = await supabase.rpc('mark_unsold', {
       p_pool_id: pool.id
     })
@@ -294,6 +315,11 @@ function App() {
   }
 
   async function relist(id) {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
     const { error } = await supabase.rpc('relist_player', {
       p_player_id: id
     })
@@ -306,6 +332,15 @@ function App() {
     }
   }
 
+  /*
+    DELETE ONE BID
+
+    This does NOT change team balance because EP is deducted
+    only when the player is SOLD.
+
+    The database function recalculates the current highest
+    remaining bid and leader.
+  */
   async function deleteBid(id) {
     if (!session) {
       setLoginOpen(true)
@@ -334,22 +369,39 @@ function App() {
     }
   }
 
+  /*
+    UNDO LAST BID
+
+    Finds the latest bid for the current player
+    and sends it through the same safe delete function.
+  */
   async function undoLastBid() {
-    if (!current?.current_player_id) return
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (!current?.current_player_id) {
+      notify('No live player')
+      return
+    }
 
     const playerBids = bids
-      .filter(b => b.player_id === current.current_player_id)
+      .filter(
+        b => b.player_id === current.current_player_id
+      )
       .sort((a, b) => {
         const dateDiff =
-          new Date(b.created_at).getTime() -
-          new Date(a.created_at).getTime()
+          new Date(a.created_at).getTime() -
+          new Date(b.created_at).getTime()
 
         if (dateDiff !== 0) return dateDiff
 
-        return Number(b.id) - Number(a.id)
+        return Number(a.id) - Number(b.id)
       })
 
-    const lastBid = playerBids[playerBids.length - 1]
+    const lastBid =
+      playerBids[playerBids.length - 1]
 
     if (!lastBid) {
       notify('There are no bids to undo')
@@ -359,23 +411,84 @@ function App() {
     await deleteBid(lastBid.id)
   }
 
+  /*
+    UNDO A COMPLETED SALE
+
+    Refunds the exact sold price, removes the player
+    from the team's squad and makes the player available.
+  */
+  async function undoSoldPlayer(resultId) {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    const result = history.find(
+      x => x.id === resultId
+    )
+
+    if (!result || result.status !== 'SOLD') {
+      notify('Only SOLD players can be undone')
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Undo the sale of ${result.player?.name || 'this player'}?\n\n` +
+      `Team: ${result.team?.name || 'Unknown'}\n` +
+      `Refund: ${result.final_price} EP\n\n` +
+      `The player will be removed from the squad and returned to available status.`
+    )
+
+    if (!confirmed) return
+
+    setUndoingSale(resultId)
+
+    const { error } = await supabase.rpc(
+      'undo_sold_player',
+      {
+        p_result_id: resultId
+      }
+    )
+
+    setUndoingSale(null)
+
+    if (error) {
+      notify(error.message)
+    } else {
+      notify(
+        `Sale undone • ${result.final_price} EP refunded`
+      )
+      await loadPool()
+    }
+  }
+
   const selectedBalance = n =>
-    balances.find(x => x.team_id === teamMap[n]?.id)?.remaining_ep ?? 150
+    balances.find(
+      x => x.team_id === teamMap[n]?.id
+    )?.remaining_ep ?? 150
 
   const nextBid = b =>
-    b < 10 ? b + 1 : b < 20 ? b + 2 : b + 5
+    b < 10
+      ? b + 1
+      : b < 20
+      ? b + 2
+      : b + 5
 
   const currentPlayerBids = current?.current_player_id
     ? bids
-        .filter(b => b.player_id === current.current_player_id)
+        .filter(
+          b =>
+            b.player_id ===
+            current.current_player_id
+        )
         .sort((a, b) => {
           const dateDiff =
-            new Date(b.created_at).getTime() -
-            new Date(a.created_at).getTime()
+            new Date(a.created_at).getTime() -
+            new Date(b.created_at).getTime()
 
           if (dateDiff !== 0) return dateDiff
 
-          return Number(b.id) - Number(a.id)
+          return Number(a.id) - Number(b.id)
         })
     : []
 
@@ -390,10 +503,13 @@ function App() {
               {poolLabel(pool)} POOL
             </div>
 
-            <div className="title">LIVE AUCTION</div>
+            <div className="title">
+              LIVE AUCTION
+            </div>
 
             <div className="sub">
-              No timer • Admin-controlled bidding • Real-time Supabase sync
+              No timer • Admin-controlled bidding •
+              Real-time Supabase sync
             </div>
           </div>
 
@@ -402,12 +518,17 @@ function App() {
             value={pool?.id || ''}
             onChange={e =>
               setPool(
-                pools.find(x => x.id === e.target.value)
+                pools.find(
+                  x => x.id === e.target.value
+                )
               )
             }
           >
             {pools.map(p => (
-              <option key={p.id} value={p.id}>
+              <option
+                key={p.id}
+                value={p.id}
+              >
                 {poolLabel(p)}
               </option>
             ))}
@@ -418,14 +539,19 @@ function App() {
           <section>
             <div className="card player">
               <div className="roll">
-                ROLL NO. {c?.current_player?.roll_number || '—'}
+                ROLL NO.{' '}
+                {c?.current_player
+                  ?.roll_number || '—'}
               </div>
 
               <div className="playername">
-                {c?.current_player?.name || 'No Player Added'}
+                {c?.current_player?.name ||
+                  'No Player Added'}
               </div>
 
-              <div className="ep">CURRENT BID</div>
+              <div className="ep">
+                CURRENT BID
+              </div>
 
               <div className="bid">
                 {c?.current_bid ?? 3}
@@ -434,7 +560,9 @@ function App() {
 
               <div
                 className={`leader ${
-                  TEAM_COLORS[c?.leader_team?.name] || ''
+                  TEAM_COLORS[
+                    c?.leader_team?.name
+                  ] || ''
                 }`}
               >
                 {c?.leader_team?.name
@@ -453,16 +581,26 @@ function App() {
                       disabled={
                         !c?.current_player ||
                         selectedBalance(n) <
-                          nextBid(c?.current_bid ?? 3)
+                          nextBid(
+                            c?.current_bid ?? 3
+                          )
                       }
                       onClick={() => bid(n)}
                     >
-                      <span className={TEAM_COLORS[n]}>
+                      <span
+                        className={
+                          TEAM_COLORS[n]
+                        }
+                      >
                         {n}
                       </span>
 
                       <small>
-                        Bid {nextBid(c?.current_bid ?? 3)} EP
+                        Bid{' '}
+                        {nextBid(
+                          c?.current_bid ?? 3
+                        )}{' '}
+                        EP
                       </small>
                     </button>
                   ))}
@@ -483,7 +621,9 @@ function App() {
                   <button
                     className="danger"
                     onClick={unsold}
-                    disabled={!c?.current_player}
+                    disabled={
+                      !c?.current_player
+                    }
                   >
                     UNSOLD
                   </button>
@@ -491,6 +631,9 @@ function App() {
                   <button
                     className="primary"
                     onClick={startPlayer}
+                    disabled={
+                      !!c?.current_player
+                    }
                   >
                     NEXT PLAYER
                   </button>
@@ -498,60 +641,112 @@ function App() {
 
                 {/* ADMIN-ONLY BID HISTORY */}
                 {c?.current_player && (
-                  <div className="card bidHistory">
+                  <div
+                    className="card"
+                    style={{
+                      marginTop: '16px'
+                    }}
+                  >
                     <div className="eyebrow">
                       ADMIN BID CONTROL
                     </div>
 
                     <div className="teamPool">
-                      {c.current_player.name} • Bid History
+                      {c.current_player.name}
+                      {' • '}
+                      Bid History
                     </div>
 
-                    {currentPlayerBids.length === 0 ? (
+                    {currentPlayerBids.length ===
+                    0 ? (
                       <div className="notice">
-                        No bids yet. Player is open at 3 EP.
+                        No bids yet. Player is
+                        open at 3 EP.
                       </div>
                     ) : (
                       <>
-                        <div className="bidList">
-                          {currentPlayerBids.map((b, index) => (
-                            <div
-                              className="bidRow"
-                              key={b.id}
-                            >
-                              <div>
-                                <strong>
-                                  {b.team?.name || 'Unknown Team'}
-                                </strong>
-
-                                <small>
-                                  {b.amount} EP
-                                </small>
-                              </div>
-
-                              <button
-                                className="danger"
-                                disabled={
-                                  deletingBid === b.id
-                                }
-                                onClick={() =>
-                                  deleteBid(b.id)
-                                }
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection:
+                              'column',
+                            gap: '8px',
+                            marginTop: '12px'
+                          }}
+                        >
+                          {currentPlayerBids.map(
+                            b => (
+                              <div
+                                key={b.id}
+                                style={{
+                                  display:
+                                    'flex',
+                                  justifyContent:
+                                    'space-between',
+                                  alignItems:
+                                    'center',
+                                  gap: '10px',
+                                  padding:
+                                    '10px 12px',
+                                  border:
+                                    '1px solid rgba(255,255,255,.1)',
+                                  borderRadius:
+                                    '10px'
+                                }}
                               >
-                                {deletingBid === b.id
-                                  ? 'Deleting…'
-                                  : '🗑 Delete'}
-                              </button>
-                            </div>
-                          ))}
+                                <div>
+                                  <strong>
+                                    {b.team?.name ||
+                                      'Unknown Team'}
+                                  </strong>
+
+                                  <div
+                                    className="sub"
+                                    style={{
+                                      marginTop:
+                                        '2px'
+                                    }}
+                                  >
+                                    {b.amount} EP
+                                  </div>
+                                </div>
+
+                                <button
+                                  className="danger"
+                                  disabled={
+                                    deletingBid ===
+                                    b.id
+                                  }
+                                  onClick={() =>
+                                    deleteBid(
+                                      b.id
+                                    )
+                                  }
+                                >
+                                  {deletingBid ===
+                                  b.id
+                                    ? 'Deleting…'
+                                    : '🗑 Delete'}
+                                </button>
+                              </div>
+                            )
+                          )}
                         </div>
 
-                        <div className="actions">
+                        <div
+                          className="actions"
+                          style={{
+                            marginTop: '12px'
+                          }}
+                        >
                           <button
                             className="danger"
-                            onClick={undoLastBid}
+                            onClick={
+                              undoLastBid
+                            }
                             disabled={
-                              currentPlayerBids.length === 0 ||
+                              currentPlayerBids.length ===
+                                0 ||
                               deletingBid !== null
                             }
                           >
@@ -603,7 +798,8 @@ function App() {
 
         <div className="card">
           <div className="notice">
-            Players are stored in Supabase. The selected pool is{' '}
+            Players are stored in Supabase.
+            The selected pool is{' '}
             <b>{poolLabel(pool)}</b>.
           </div>
 
@@ -634,6 +830,11 @@ function App() {
   }
 
   function teamsPage() {
+    const soldHistory =
+      history.filter(
+        x => x.status === 'SOLD'
+      )
+
     return (
       <>
         <Header
@@ -644,22 +845,34 @@ function App() {
 
         <div className="stats">
           {TEAM_NAMES.map(n => (
-            <div className="stat" key={n}>
-              <span className={TEAM_COLORS[n]}>
+            <div
+              className="stat"
+              key={n}
+            >
+              <span
+                className={
+                  TEAM_COLORS[n]
+                }
+              >
                 {n}
               </span>
 
-              <b>{selectedBalance(n)} EP</b>
+              <b>
+                {selectedBalance(n)} EP
+              </b>
 
               <small>
-                remaining in {poolLabel(pool)}
+                remaining in{' '}
+                {poolLabel(pool)}
               </small>
             </div>
           ))}
         </div>
 
         <div className="card">
-          <div className="eyebrow">SQUADS</div>
+          <div className="eyebrow">
+            SQUADS
+          </div>
 
           <table className="table">
             <thead>
@@ -667,32 +880,75 @@ function App() {
                 <th>Player</th>
                 <th>Team</th>
                 <th>Price</th>
+                {mode === 'admin' && (
+                  <th>Action</th>
+                )}
               </tr>
             </thead>
 
             <tbody>
-              {history
-                .filter(x => x.status === 'SOLD')
-                .map(x => (
+              {soldHistory.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={
+                      mode === 'admin'
+                        ? 4
+                        : 3
+                    }
+                  >
+                    No sold players yet.
+                  </td>
+                </tr>
+              ) : (
+                soldHistory.map(x => (
                   <tr key={x.id}>
                     <td>
-                      {x.player?.roll_number} —{' '}
+                      {x.player
+                        ?.roll_number}{' '}
+                      —{' '}
                       {x.player?.name}
                     </td>
 
                     <td
                       className={
-                        TEAM_COLORS[x.team?.name]
+                        TEAM_COLORS[
+                          x.team?.name
+                        ]
                       }
                     >
-                      {x.team?.name}
+                      {x.team?.name ||
+                        '—'}
                     </td>
 
                     <td>
                       {x.final_price} EP
                     </td>
+
+                    {mode ===
+                      'admin' && (
+                      <td>
+                        <button
+                          className="danger"
+                          disabled={
+                            undoingSale ===
+                            x.id
+                          }
+                          onClick={() =>
+                            undoSoldPlayer(
+                              x.id
+                            )
+                          }
+                        >
+                          {undoingSale ===
+                          x.id
+                            ? 'Refunding…'
+                            : '↩ Undo Sale'}
+                        </button>
+                      </td>
+                    )}
                   </tr>
-                ))}
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -724,14 +980,17 @@ function App() {
               {history.map(x => (
                 <tr key={x.id}>
                   <td>
-                    {x.player?.roll_number} —{' '}
+                    {x.player
+                      ?.roll_number}{' '}
+                    —{' '}
                     {x.player?.name}
                   </td>
 
                   <td>{x.status}</td>
 
                   <td>
-                    {x.team?.name || '—'}
+                    {x.team?.name ||
+                      '—'}
                   </td>
 
                   <td>
@@ -759,11 +1018,19 @@ function App() {
 
         <div className="stats poolsGrid">
           {pools.map(p => (
-            <div className="stat" key={p.id}>
-              <span>{poolLabel(p)}</span>
+            <div
+              className="stat"
+              key={p.id}
+            >
+              <span>
+                {poolLabel(p)}
+              </span>
+
               <b>5 × 150 EP</b>
+
               <small>
-                Independent team budgets
+                Independent team
+                budgets
               </small>
             </div>
           ))}
@@ -772,21 +1039,24 @@ function App() {
     )
   }
 
-  if (loading)
+  if (loading) {
     return (
       <div className="loading">
         Loading Euphoria…
       </div>
     )
+  }
 
-  if (!supabaseConfigured)
+  if (!supabaseConfigured) {
     return <SetupScreen />
+  }
 
   return (
     <div className="app">
       <header className="top">
         <div className="brand">
-          EUPHORIA<span> AUCTION</span>
+          EUPHORIA
+          <span> AUCTION</span>
         </div>
 
         <div className="topright">
@@ -824,36 +1094,56 @@ function App() {
         <aside className="side">
           <div className="nav">
             <Nav
-              active={page === 'auction'}
-              onClick={() => setPage('auction')}
+              active={
+                page === 'auction'
+              }
+              onClick={() =>
+                setPage('auction')
+              }
             >
               🔴 Live Auction
             </Nav>
 
             <Nav
-              active={page === 'players'}
-              onClick={() => setPage('players')}
+              active={
+                page === 'players'
+              }
+              onClick={() =>
+                setPage('players')
+              }
             >
               👤 Players
             </Nav>
 
             <Nav
-              active={page === 'teams'}
-              onClick={() => setPage('teams')}
+              active={
+                page === 'teams'
+              }
+              onClick={() =>
+                setPage('teams')
+              }
             >
               🏆 Teams
             </Nav>
 
             <Nav
-              active={page === 'history'}
-              onClick={() => setPage('history')}
+              active={
+                page === 'history'
+              }
+              onClick={() =>
+                setPage('history')
+              }
             >
               📜 Auction History
             </Nav>
 
             <Nav
-              active={page === 'pools'}
-              onClick={() => setPage('pools')}
+              active={
+                page === 'pools'
+              }
+              onClick={() =>
+                setPage('pools')
+              }
             >
               🗂 Pools
             </Nav>
@@ -876,7 +1166,9 @@ function App() {
       {loginOpen && (
         <Login
           onLogin={login}
-          onClose={() => setLoginOpen(false)}
+          onClose={() =>
+            setLoginOpen(false)
+          }
         />
       )}
 
@@ -889,12 +1181,17 @@ function App() {
   )
 }
 
-function TeamCard({ name, balance }) {
+function TeamCard({
+  name,
+  balance
+}) {
   return (
     <div className="team">
       <div className="teamtop">
         <span
-          className={`teamname ${TEAM_COLORS[name]}`}
+          className={`teamname ${
+            TEAM_COLORS[name]
+          }`}
         >
           {name}
         </span>
@@ -905,7 +1202,9 @@ function TeamCard({ name, balance }) {
       </div>
 
       <div
-        className={`bar ${TEAM_COLORS[name]}`}
+        className={`bar ${
+          TEAM_COLORS[name]
+        }`}
       >
         <i
           style={{
@@ -913,7 +1212,8 @@ function TeamCard({ name, balance }) {
               0,
               Math.min(
                 100,
-                (balance / 150) * 100
+                (balance / 150) *
+                  100
               )
             )}%`
           }}
@@ -923,22 +1223,40 @@ function TeamCard({ name, balance }) {
   )
 }
 
-function Header({ eyebrow, title, sub }) {
+function Header({
+  eyebrow,
+  title,
+  sub
+}) {
   return (
     <div className="sectionhead">
       <div>
-        <div className="eyebrow">{eyebrow}</div>
-        <div className="title">{title}</div>
-        <div className="sub">{sub}</div>
+        <div className="eyebrow">
+          {eyebrow}
+        </div>
+
+        <div className="title">
+          {title}
+        </div>
+
+        <div className="sub">
+          {sub}
+        </div>
       </div>
     </div>
   )
 }
 
-function Nav({ active, onClick, children }) {
+function Nav({
+  active,
+  onClick,
+  children
+}) {
   return (
     <button
-      className={active ? 'active' : ''}
+      className={
+        active ? 'active' : ''
+      }
       onClick={onClick}
     >
       {children}
@@ -952,9 +1270,15 @@ function poolLabel(p) {
     : '—'
 }
 
-function Login({ onLogin, onClose }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+function Login({
+  onLogin,
+  onClose
+}) {
+  const [email, setEmail] =
+    useState('')
+
+  const [password, setPassword] =
+    useState('')
 
   return (
     <div className="modal">
@@ -964,8 +1288,8 @@ function Login({ onLogin, onClose }) {
         </div>
 
         <div className="sub">
-          Only authenticated admins can run
-          the auction.
+          Only authenticated admins
+          can run the auction.
         </div>
 
         <input
@@ -973,7 +1297,9 @@ function Login({ onLogin, onClose }) {
           placeholder="Admin email"
           value={email}
           onChange={e =>
-            setEmail(e.target.value)
+            setEmail(
+              e.target.value
+            )
           }
         />
 
@@ -983,7 +1309,9 @@ function Login({ onLogin, onClose }) {
           placeholder="Password"
           value={password}
           onChange={e =>
-            setPassword(e.target.value)
+            setPassword(
+              e.target.value
+            )
           }
         />
 
@@ -998,7 +1326,10 @@ function Login({ onLogin, onClose }) {
           <button
             className="btn primary"
             onClick={() =>
-              onLogin(email, password)
+              onLogin(
+                email,
+                password
+              )
             }
           >
             Login
@@ -1014,15 +1345,18 @@ function SetupScreen() {
     <div className="loading">
       <div className="card setup">
         <div className="title">
-          Euphoria is ready for Supabase
+          Euphoria is ready for
+          Supabase
         </div>
 
         <p className="sub">
-          Add VITE_SUPABASE_URL and
-          VITE_SUPABASE_ANON_KEY to your
-          Vercel environment variables, run
-          the supplied SQL in Supabase, then
-          redeploy.
+          Add
+          VITE_SUPABASE_URL and
+          VITE_SUPABASE_ANON_KEY
+          to your Vercel
+          environment variables,
+          run the supplied SQL in
+          Supabase, then redeploy.
         </p>
       </div>
     </div>
