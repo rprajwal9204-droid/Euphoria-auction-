@@ -13,10 +13,6 @@ const TEAM_COLORS = {
 
 const TEAM_NAMES = Object.keys(TEAM_COLORS)
 
-/* =========================================================
-   APP
-========================================================= */
-
 function App() {
   const [mode, setMode] = useState('public')
   const [page, setPage] = useState('auction')
@@ -48,33 +44,17 @@ function App() {
   const [undoingSale, setUndoingSale] = useState(null)
   const [deletingPlayer, setDeletingPlayer] = useState(null)
 
-  /* =========================================================
-     MANUAL PLAYER ADD
-  ========================================================= */
-
   const [manualAddOpen, setManualAddOpen] = useState(false)
   const [manualRoll, setManualRoll] = useState('')
   const [manualName, setManualName] = useState('')
   const [addingManual, setAddingManual] = useState(false)
 
-  /* =========================================================
-     CSV
-  ========================================================= */
-
   const [importOpen, setImportOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importFile, setImportFile] = useState(null)
 
-  /* =========================================================
-     MANUAL SOLD
-     
-     IMPORTANT:
-     Manual SOLD works ONLY on the CURRENT LIVE PLAYER.
-     
-     There is intentionally NO player dropdown here.
-  ========================================================= */
-
   const [manualSoldOpen, setManualSoldOpen] = useState(false)
+  const [manualSoldPlayer, setManualSoldPlayer] = useState('')
   const [manualSoldTeam, setManualSoldTeam] = useState('')
   const [manualSoldPoints, setManualSoldPoints] = useState('')
   const [manualSelling, setManualSelling] = useState(false)
@@ -99,12 +79,20 @@ function App() {
     supabase.auth.getSession().then(({ data }) => {
       if (active) {
         setSession(data.session)
+
+        if (data.session) {
+          setMode('admin')
+        }
       }
     })
 
     const { data: sub } = supabase.auth.onAuthStateChange(
       (_event, newSession) => {
         setSession(newSession)
+
+        if (newSession) {
+          setMode('admin')
+        }
       }
     )
 
@@ -122,10 +110,6 @@ function App() {
     loadBase()
   }, [])
 
-  /* =========================================================
-     POOL REALTIME
-  ========================================================= */
-
   useEffect(() => {
     if (!pool || !supabaseConfigured) return
 
@@ -133,7 +117,6 @@ function App() {
 
     const channel = supabase
       .channel(`auction-${pool.id}`)
-
       .on(
         'postgres_changes',
         {
@@ -144,7 +127,6 @@ function App() {
         },
         loadPool
       )
-
       .on(
         'postgres_changes',
         {
@@ -155,7 +137,6 @@ function App() {
         },
         loadPool
       )
-
       .on(
         'postgres_changes',
         {
@@ -166,7 +147,6 @@ function App() {
         },
         loadPool
       )
-
       .on(
         'postgres_changes',
         {
@@ -177,7 +157,6 @@ function App() {
         },
         loadPool
       )
-
       .on(
         'postgres_changes',
         {
@@ -188,17 +167,12 @@ function App() {
         },
         loadPool
       )
-
       .subscribe()
 
     return () => {
       supabase.removeChannel(channel)
     }
   }, [pool?.id])
-
-  /* =========================================================
-     BASE DATA
-  ========================================================= */
 
   async function loadBase() {
     if (!supabaseConfigured) return
@@ -217,9 +191,7 @@ function App() {
 
       supabase
         .from('auction_results')
-        .select(
-          '*, player:players(*), team:teams(*), pool:pools(*)'
-        )
+        .select('*, player:players(*), team:teams(*), pool:pools(*)')
         .order('created_at', { ascending: false })
     ])
 
@@ -232,72 +204,59 @@ function App() {
     setAllHistory(results.data || [])
 
     if (p.data?.length) {
-      setPool(prev => {
-        if (prev) return prev
-
-        return (
+      setPool(
+        prev =>
+          prev ||
           p.data.find(
             x =>
               x.batch_year === 2024 &&
               x.gender === 'Male'
-          ) || p.data[0]
-        )
-      })
+          ) ||
+          p.data[0]
+      )
     }
 
     setLoading(false)
   }
 
-  /* =========================================================
-     LOAD CURRENT POOL
-  ========================================================= */
-
   async function loadPool() {
     if (!pool) return
 
-    const [
-      state,
-      bal,
-      ps,
-      hist,
-      bidData
-    ] = await Promise.all([
-      supabase
-        .from('auction_states')
-        .select('*, current_player:players(*)')
-        .eq('pool_id', pool.id)
-        .single(),
+    const [state, bal, ps, hist, bidData] =
+      await Promise.all([
+        supabase
+          .from('auction_states')
+          .select('*, current_player:players(*)')
+          .eq('pool_id', pool.id)
+          .single(),
 
-      supabase
-        .from('team_pool_balances')
-        .select('*, team:teams(*)')
-        .eq('pool_id', pool.id)
-        .order('id'),
+        supabase
+          .from('team_pool_balances')
+          .select('*, team:teams(*)')
+          .eq('pool_id', pool.id)
+          .order('id'),
 
-      supabase
-        .from('players')
-        .select('*')
-        .eq('pool_id', pool.id)
-        .order('created_at', { ascending: false }),
+        supabase
+          .from('players')
+          .select('*')
+          .eq('pool_id', pool.id)
+          .order('created_at', { ascending: false }),
 
-      supabase
-        .from('auction_results')
-        .select('*, player:players(*), team:teams(*)')
-        .eq('pool_id', pool.id)
-        .order('created_at', { ascending: false }),
+        supabase
+          .from('auction_results')
+          .select('*, player:players(*), team:teams(*)')
+          .eq('pool_id', pool.id)
+          .order('created_at', { ascending: false }),
 
-      supabase
-        .from('bids')
-        .select('*, team:teams(*)')
-        .eq('pool_id', pool.id)
-        .order('created_at', { ascending: false })
-        .order('id', { ascending: false })
-    ])
+        supabase
+          .from('bids')
+          .select('*, team:teams(*)')
+          .eq('pool_id', pool.id)
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
+      ])
 
-    if (
-      state.error &&
-      state.error.code !== 'PGRST116'
-    ) {
+    if (state.error && state.error.code !== 'PGRST116') {
       notify(state.error.message)
     }
 
@@ -318,16 +277,10 @@ function App() {
         .select(
           '*, player:players(*), team:teams(*), pool:pools(*)'
         )
-        .order('created_at', {
-          ascending: false
-        })
+        .order('created_at', { ascending: false })
 
     setAllHistory(completeHistory || [])
   }
-
-  /* =========================================================
-     NOTIFICATION
-  ========================================================= */
 
   function notify(msg) {
     setToast(msg)
@@ -344,7 +297,7 @@ function App() {
   async function login(email, password) {
     if (!supabase) return
 
-    const { error } =
+    const { data, error } =
       await supabase.auth.signInWithPassword({
         email,
         password
@@ -352,14 +305,20 @@ function App() {
 
     if (error) {
       notify(error.message)
-    } else {
-      setLoginOpen(false)
+      return
+    }
+
+    if (data?.session) {
+      setSession(data.session)
       setMode('admin')
+      setLoginOpen(false)
+      notify('Admin login successful')
     }
   }
 
   async function logout() {
     await supabase.auth.signOut()
+    setSession(null)
     setMode('public')
   }
 
@@ -367,8 +326,8 @@ function App() {
      MANUAL PLAYER ADD
      
      IMPORTANT:
-     Use RPC instead of direct INSERT.
-     This avoids the RLS error.
+     This does NOT call import_player/import_players.
+     It directly inserts into public.players.
   ========================================================= */
 
   async function addManualPlayer() {
@@ -399,49 +358,73 @@ function App() {
 
     if (duplicate) {
       notify(
-        `Roll number ${roll} already exists in ${poolLabel(
-          pool
-        )}`
+        `Roll number ${roll} already exists in ${poolLabel(pool)}`
       )
       return
     }
 
     setAddingManual(true)
 
-    /*
-     * Use the owner-protected two-argument RPC.
-     */
-    const { error } = await supabase.rpc(
-      'import_players',
-      {
-        p_pool_id: pool.id,
-        p_players: [
-          {
-            roll_number: roll,
-            name
-          }
-        ]
+    try {
+      /*
+       * DIRECT INSERT.
+       *
+       * No import_player RPC.
+       * No import_players RPC.
+       */
+      const { error } = await supabase
+        .from('players')
+        .insert({
+          pool_id: pool.id,
+          roll_number: roll,
+          name,
+          base_price: 3,
+          status: 'available'
+        })
+
+      if (error) {
+        if (
+          error.code === '23505' ||
+          String(error.message || '')
+            .toLowerCase()
+            .includes('duplicate')
+        ) {
+          notify(`Roll number ${roll} already exists`)
+        } else if (
+          error.code === '42501' ||
+          String(error.message || '')
+            .toLowerCase()
+            .includes('row-level security')
+        ) {
+          notify(
+            'Player insert blocked by Supabase RLS. Run the supplied RLS SQL.'
+          )
+        } else {
+          notify(error.message)
+        }
+
+        return
       }
-    )
 
-    setAddingManual(false)
+      setManualRoll('')
+      setManualName('')
+      setManualAddOpen(false)
 
-    if (error) {
-      notify(error.message)
-      return
+      notify(`${name} added successfully`)
+
+      await loadPool()
+    } catch (error) {
+      notify(
+        error?.message ||
+          'Could not add player'
+      )
+    } finally {
+      setAddingManual(false)
     }
-
-    setManualRoll('')
-    setManualName('')
-    setManualAddOpen(false)
-
-    notify(`${name} added successfully`)
-
-    await loadPool()
   }
 
   /* =========================================================
-     CSV HELPERS
+     CSV
   ========================================================= */
 
   function normalizeCsvHeader(value) {
@@ -462,11 +445,7 @@ function App() {
       const char = text[i]
       const next = text[i + 1]
 
-      if (
-        char === '"' &&
-        insideQuotes &&
-        next === '"'
-      ) {
+      if (char === '"' && insideQuotes && next === '"') {
         cell += '"'
         i++
         continue
@@ -487,12 +466,7 @@ function App() {
         (char === '\n' || char === '\r') &&
         !insideQuotes
       ) {
-        if (
-          char === '\r' &&
-          next === '\n'
-        ) {
-          i++
-        }
+        if (char === '\r' && next === '\n') i++
 
         row.push(cell)
         cell = ''
@@ -525,10 +499,6 @@ function App() {
     return rows
   }
 
-  /* =========================================================
-     CSV IMPORT
-  ========================================================= */
-
   async function importPlayersFromCsv() {
     if (!session) {
       setLoginOpen(true)
@@ -555,7 +525,6 @@ function App() {
         notify(
           'CSV must contain a header and at least one player'
         )
-        setImporting(false)
         return
       }
 
@@ -601,17 +570,17 @@ function App() {
         notify(
           'CSV must contain roll_number and name columns'
         )
-        setImporting(false)
         return
       }
 
-      const existingRolls = new Set(
-        players.map(p =>
-          String(p.roll_number)
-            .trim()
-            .toLowerCase()
+      const existingRolls =
+        new Set(
+          players.map(p =>
+            String(p.roll_number)
+              .trim()
+              .toLowerCase()
+          )
         )
-      )
 
       const seen = new Set()
       const payload = []
@@ -700,11 +669,15 @@ function App() {
         notify(
           `Nothing to import • ${duplicateCount} duplicate(s), ${invalidCount} invalid row(s)`
         )
-
-        setImporting(false)
         return
       }
 
+      /*
+       * CSV ONLY:
+       * Your database confirms this function exists:
+       *
+       * import_players(p_players jsonb)
+       */
       const { data, error } =
         await supabase.rpc(
           'import_players',
@@ -715,7 +688,6 @@ function App() {
 
       if (error) {
         notify(error.message)
-        setImporting(false)
         return
       }
 
@@ -742,13 +714,13 @@ function App() {
         error?.message ||
           'Could not read CSV file'
       )
+    } finally {
+      setImporting(false)
     }
-
-    setImporting(false)
   }
 
   /* =========================================================
-     START PLAYER
+     AUCTION
   ========================================================= */
 
   async function startPlayerByRoll() {
@@ -757,8 +729,7 @@ function App() {
       return
     }
 
-    const roll =
-      rollNumber.trim()
+    const roll = rollNumber.trim()
 
     if (!roll) {
       notify('Enter a roll number')
@@ -805,10 +776,6 @@ function App() {
     await loadPool()
   }
 
-  /* =========================================================
-     NORMAL BID
-  ========================================================= */
-
   async function bid(teamName) {
     const team = teamMap[teamName]
 
@@ -850,28 +817,15 @@ function App() {
     }
   }
 
-  /* =========================================================
-     NORMAL SOLD
-     
-     Only current live player.
-  ========================================================= */
-
   async function sold() {
-    if (!current?.current_player_id) {
-      notify('No live player')
-      return
-    }
-
-    if (!current?.leader_team_id) {
+    if (
+      !current?.leader_team_id
+    ) {
       notify(
         'Player has no winning team'
       )
       return
     }
-
-    const playerName =
-      current.current_player?.name ||
-      'Player'
 
     const { error } =
       await supabase.rpc(
@@ -884,27 +838,18 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
-      notify(
-        `${playerName} SOLD`
-      )
-
+      notify('Player SOLD')
       await loadPool()
     }
   }
 
-  /* =========================================================
-     UNSOLD
-  ========================================================= */
-
   async function unsold() {
-    if (!current?.current_player_id) {
+    if (
+      !current?.current_player_id
+    ) {
       notify('No live player')
       return
     }
-
-    const playerName =
-      current.current_player?.name ||
-      'Player'
 
     const { error } =
       await supabase.rpc(
@@ -918,9 +863,8 @@ function App() {
       notify(error.message)
     } else {
       notify(
-        `${playerName} UNSOLD • You can enter the same roll number again`
+        'Player UNSOLD • You can enter the same roll number again'
       )
-
       await loadPool()
     }
   }
@@ -928,19 +872,13 @@ function App() {
   /* =========================================================
      MANUAL SOLD
      
-     THIS IS THE IMPORTANT FIX.
+     IMPORTANT CHANGE:
+     Manual SOLD is ONLY available for the
+     CURRENT LIVE BIDDING PLAYER.
      
-     Manual SOLD:
-       - ONLY current player
-       - NO player dropdown
-       - Team selected manually
-       - Price selected manually
-       - Calls the SQL manual-sale RPC
+     It does NOT show a player selector.
      
-     The SQL function should be the function
-     created in the SQL replacement script:
-     
-       manual_sell_current_player
+     The current player's name is displayed.
   ========================================================= */
 
   async function manualSellCurrentPlayer() {
@@ -1001,19 +939,19 @@ function App() {
       return
     }
 
-    const playerName =
-      current.current_player?.name ||
-      'Current player'
-
-    const playerRoll =
+    const player =
       current.current_player
-        ?.roll_number || '—'
+
+    if (!player) {
+      notify('No current player')
+      return
+    }
 
     if (
       !window.confirm(
         `Confirm MANUAL SOLD?\n\n` +
-        `Player: ${playerName}\n` +
-        `Roll: ${playerRoll}\n` +
+        `Player: ${player.name}\n` +
+        `Roll: ${player.roll_number}\n` +
         `Team: ${manualSoldTeam}\n` +
         `Price: ${amount} EP`
       )
@@ -1025,19 +963,45 @@ function App() {
 
     try {
       /*
-       * IMPORTANT:
-       * Do NOT call start_player_by_roll here.
+       * If there are already bids, manual SOLD
+       * replaces the final price with the
+       * requested manual amount by deleting
+       * existing bids first.
        *
-       * The player is ALREADY the current live player.
-       *
-       * Do NOT call manual_bid + sell_current_player
-       * either, because manual sale must be able to
-       * directly set the requested sale price.
+       * This keeps the current player live.
        */
 
-      const { error } =
+      const existingBids =
+        bids.filter(
+          b =>
+            b.player_id ===
+            current.current_player_id
+        )
+
+      for (
+        const existing of existingBids
+      ) {
+        const { error } =
+          await supabase.rpc(
+            'delete_bid',
+            {
+              p_bid_id: existing.id
+            }
+          )
+
+        if (error) {
+          notify(error.message)
+          await loadPool()
+          return
+        }
+      }
+
+      /*
+       * Create the exact manual bid.
+       */
+      const bidResult =
         await supabase.rpc(
-          'manual_sell_current_player',
+          'manual_bid',
           {
             p_pool_id: pool.id,
             p_team_id: team.id,
@@ -1045,10 +1009,31 @@ function App() {
           }
         )
 
-      if (error) {
-        notify(error.message)
+      if (bidResult.error) {
         await loadPool()
-        setManualSelling(false)
+        notify(
+          bidResult.error.message
+        )
+        return
+      }
+
+      /*
+       * Immediately mark the SAME CURRENT
+       * PLAYER as SOLD.
+       */
+      const saleResult =
+        await supabase.rpc(
+          'sell_current_player',
+          {
+            p_pool_id: pool.id
+          }
+        )
+
+      if (saleResult.error) {
+        await loadPool()
+        notify(
+          saleResult.error.message
+        )
         return
       }
 
@@ -1057,18 +1042,18 @@ function App() {
       setManualSoldOpen(false)
 
       notify(
-        `${playerName} SOLD to ${manualSoldTeam} for ${amount} EP`
+        `${player.name} SOLD to ${manualSoldTeam} for ${amount} EP`
       )
 
       await loadPool()
     } catch (error) {
       notify(
         error?.message ||
-          'Manual SOLD failed'
+          'Manual sale failed'
       )
+    } finally {
+      setManualSelling(false)
     }
-
-    setManualSelling(false)
   }
 
   /* =========================================================
@@ -1115,7 +1100,9 @@ function App() {
       return
     }
 
-    if (!current?.current_player_id) {
+    if (
+      !current?.current_player_id
+    ) {
       notify('No live player')
       return
     }
@@ -1127,24 +1114,26 @@ function App() {
             b.player_id ===
             current.current_player_id
         )
-        .sort((a, b) => {
-          const difference =
-            new Date(
-              a.created_at
-            ).getTime() -
-            new Date(
-              b.created_at
-            ).getTime()
+        .sort(
+          (a, b) => {
+            const difference =
+              new Date(
+                a.created_at
+              ).getTime() -
+              new Date(
+                b.created_at
+              ).getTime()
 
-          if (difference !== 0) {
-            return difference
+            if (difference !== 0) {
+              return difference
+            }
+
+            return (
+              Number(a.id) -
+              Number(b.id)
+            )
           }
-
-          return (
-            Number(a.id) -
-            Number(b.id)
-          )
-        })
+        )
 
     const lastBid =
       playerBids[
@@ -1161,11 +1150,9 @@ function App() {
     await deleteBid(lastBid.id)
   }
 
-  /* =========================================================
-     UNDO SOLD
-  ========================================================= */
-
-  async function undoSoldPlayer(resultId) {
+  async function undoSoldPlayer(
+    resultId
+  ) {
     if (!session) {
       setLoginOpen(true)
       return
@@ -1196,10 +1183,7 @@ function App() {
           result.team?.name ||
           'Unknown'
         }\n` +
-        `Refund: ${
-          result.final_price
-        } EP\n\n` +
-        `The player will be returned to available status.`
+        `Refund: ${result.final_price} EP`
       )
     ) {
       return
@@ -1223,16 +1207,13 @@ function App() {
       notify(
         `Sale undone • ${result.final_price} EP refunded`
       )
-
       await loadPool()
     }
   }
 
-  /* =========================================================
-     DELETE PLAYER
-  ========================================================= */
-
-  async function deletePlayer(playerId) {
+  async function deletePlayer(
+    playerId
+  ) {
     if (!session) {
       setLoginOpen(true)
       return
@@ -1293,8 +1274,7 @@ function App() {
       )?.remaining_ep ?? 150
 
   const nextBid = b => {
-    const value =
-      Number(b)
+    const value = Number(b)
 
     if (!Number.isFinite(value)) {
       return 3
@@ -1319,24 +1299,26 @@ function App() {
               b.player_id ===
               current.current_player_id
           )
-          .sort((a, b) => {
-            const difference =
-              new Date(
-                a.created_at
-              ).getTime() -
-              new Date(
-                b.created_at
-              ).getTime()
+          .sort(
+            (a, b) => {
+              const difference =
+                new Date(
+                  a.created_at
+                ).getTime() -
+                new Date(
+                  b.created_at
+                ).getTime()
 
-            if (difference !== 0) {
-              return difference
+              if (difference !== 0) {
+                return difference
+              }
+
+              return (
+                Number(a.id) -
+                Number(b.id)
+              )
             }
-
-            return (
-              Number(a.id) -
-              Number(b.id)
-            )
-          })
+          )
       : []
 
   const displayedBidAmount =
@@ -1349,8 +1331,6 @@ function App() {
   function currentPoolTeamPlayers(
     teamName
   ) {
-    if (!pool) return []
-
     return history.filter(
       x =>
         x.status === 'SOLD' &&
@@ -1387,10 +1367,15 @@ function App() {
   ========================================================= */
 
   function PlayerManagement() {
+    const hasLivePlayer =
+      !!current?.current_player_id
+
     return (
       <div
         className="card"
-        style={{ marginTop: '16px' }}
+        style={{
+          marginTop: '16px'
+        }}
       >
         <div className="eyebrow">
           PLAYER MANAGEMENT
@@ -1402,7 +1387,9 @@ function App() {
 
         <div
           className="actions"
-          style={{ marginTop: '12px' }}
+          style={{
+            marginTop: '12px'
+          }}
         >
           <button
             className="btn primary"
@@ -1410,7 +1397,6 @@ function App() {
               setManualAddOpen(
                 !manualAddOpen
               )
-
               setImportOpen(false)
               setManualSoldOpen(false)
             }}
@@ -1424,7 +1410,6 @@ function App() {
               setImportOpen(
                 !importOpen
               )
-
               setManualAddOpen(false)
               setManualSoldOpen(false)
             }}
@@ -1434,13 +1419,27 @@ function App() {
 
           <button
             className="btn"
+            disabled={!hasLivePlayer}
             onClick={() => {
+              if (!hasLivePlayer) {
+                notify(
+                  'Manual SOLD is available only for the current bidding player'
+                )
+                return
+              }
+
               setManualSoldOpen(
                 !manualSoldOpen
               )
-
               setManualAddOpen(false)
               setImportOpen(false)
+
+              if (
+                !manualSoldOpen
+              ) {
+                setManualSoldTeam('')
+                setManualSoldPoints('')
+              }
             }}
           >
             💰 Manual SOLD
@@ -1523,9 +1522,11 @@ function App() {
                 marginTop: '10px'
               }}
             >
-              Duplicate roll numbers in
-              this pool are automatically
-              blocked.
+              Player will be added to{' '}
+              <b>
+                {poolLabel(pool)}
+              </b>
+              .
             </div>
           </div>
         )}
@@ -1555,7 +1556,7 @@ function App() {
               <br />
               <br />
 
-              You can also include:
+              Or:
               <br />
               <b>
                 batch,gender,roll_number,name
@@ -1563,9 +1564,8 @@ function App() {
               <br />
               <br />
 
-              If batch/gender are not
-              included, the currently
-              selected pool is used.
+              If batch/gender are missing,
+              the selected pool is used.
             </div>
 
             <input
@@ -1614,24 +1614,12 @@ function App() {
                 Cancel
               </button>
             </div>
-
-            <div
-              className="notice"
-              style={{
-                marginTop: '10px'
-              }}
-            >
-              ⚠️ Duplicate players are
-              skipped. Duplicate roll
-              numbers inside the same CSV
-              are also skipped.
-            </div>
           </div>
         )}
 
         {/* =====================================================
             MANUAL SOLD
-            CURRENT PLAYER ONLY
+            ONLY CURRENT PLAYER
         ===================================================== */}
 
         {manualSoldOpen && (
@@ -1641,46 +1629,25 @@ function App() {
             }}
           >
             <div className="eyebrow">
-              MANUAL SOLD • CURRENT PLAYER
+              MANUAL SOLD
             </div>
 
-            {!current?.current_player ? (
-              <div
-                className="notice"
-                style={{
-                  marginTop: '10px'
-                }}
-              >
-                ⚠️ There is no current
-                bidding player.
-                <br />
-                Start a player first using
-                <b> NEXT PLAYER</b>.
-                <br />
-                Manual SOLD can only be
-                used for the player currently
-                on the auction screen.
-              </div>
-            ) : (
+            {current?.current_player ? (
               <>
-                {/* CURRENT PLAYER DISPLAY */}
-
                 <div
                   className="card"
                   style={{
-                    marginTop: '10px',
-                    border:
-                      '1px solid rgba(255,255,255,.15)'
+                    marginTop: '10px'
                   }}
                 >
                   <div className="eyebrow">
-                    CURRENT PLAYER
+                    CURRENT BIDDING PLAYER
                   </div>
 
                   <div
                     className="playername"
                     style={{
-                      fontSize: '26px',
+                      fontSize: '28px',
                       marginTop: '5px'
                     }}
                   >
@@ -1691,12 +1658,7 @@ function App() {
                     }
                   </div>
 
-                  <div
-                    className="sub"
-                    style={{
-                      marginTop: '5px'
-                    }}
-                  >
+                  <div className="sub">
                     Roll No.{' '}
                     {
                       current
@@ -1711,14 +1673,10 @@ function App() {
                       marginTop: '10px'
                     }}
                   >
-                    This player will be
-                    marked <b>SOLD</b>.
-                    You cannot choose another
-                    player here.
+                    ✓ This is the only player
+                    that can be manually SOLD.
                   </div>
                 </div>
-
-                {/* TEAM */}
 
                 <select
                   className="select"
@@ -1756,8 +1714,6 @@ function App() {
                   )}
                 </select>
 
-                {/* PRICE */}
-
                 <input
                   className="field"
                   style={{
@@ -1767,7 +1723,7 @@ function App() {
                   type="number"
                   min="3"
                   step="1"
-                  placeholder="Sale price / EP"
+                  placeholder="Sale points / EP"
                   value={
                     manualSoldPoints
                   }
@@ -1797,7 +1753,7 @@ function App() {
                   >
                     {manualSelling
                       ? 'Selling…'
-                      : '✓ MANUAL SOLD'}
+                      : '✓ CONFIRM SOLD'}
                   </button>
 
                   <button
@@ -1806,14 +1762,8 @@ function App() {
                       setManualSoldOpen(
                         false
                       )
-
-                      setManualSoldTeam(
-                        ''
-                      )
-
-                      setManualSoldPoints(
-                        ''
-                      )
+                      setManualSoldTeam('')
+                      setManualSoldPoints('')
                     }}
                   >
                     Cancel
@@ -1834,13 +1784,18 @@ function App() {
                         selectedBalance(
                           manualSoldTeam
                         )
-                      }{' '}
-                      EP
+                      } EP
                     </b>
                     .
                   </div>
                 )}
               </>
+            ) : (
+              <div className="notice">
+                Manual SOLD is available only
+                when a player is currently
+                being auctioned.
+              </div>
             )}
           </div>
         )}
@@ -1908,7 +1863,8 @@ function App() {
               <div className="roll">
                 ROLL NO.{' '}
                 {c?.current_player
-                  ?.roll_number || '—'}
+                  ?.roll_number ||
+                  '—'}
               </div>
 
               <div className="playername">
@@ -1928,8 +1884,7 @@ function App() {
               <div
                 className={`leader ${
                   TEAM_COLORS[
-                    c?.leader_team
-                      ?.name
+                    c?.leader_team?.name
                   ] || ''
                 }`}
               >
@@ -1941,8 +1896,6 @@ function App() {
 
             {mode === 'admin' && (
               <>
-                {/* TEAM BIDDING */}
-
                 <div className="controls">
                   {TEAM_NAMES.map(
                     name => (
@@ -1982,8 +1935,6 @@ function App() {
                   )}
                 </div>
 
-                {/* AUCTION ACTIONS */}
-
                 <div className="actions">
                   <button
                     className="success"
@@ -2019,11 +1970,7 @@ function App() {
                   </button>
                 </div>
 
-                {/* PLAYER MANAGEMENT */}
-
                 <PlayerManagement />
-
-                {/* NEXT PLAYER */}
 
                 {rollOpen && (
                   <div
@@ -2063,8 +2010,7 @@ function App() {
                         }
                         onChange={e =>
                           setRollNumber(
-                            e.target
-                              .value
+                            e.target.value
                           )
                         }
                         onKeyDown={e => {
@@ -2098,33 +2044,14 @@ function App() {
                           setRollOpen(
                             false
                           )
-
-                          setRollNumber(
-                            ''
-                          )
+                          setRollNumber('')
                         }}
                       >
                         Cancel
                       </button>
                     </div>
-
-                    <div
-                      className="notice"
-                      style={{
-                        marginTop: '12px'
-                      }}
-                    >
-                      Type the roll number
-                      of any available or
-                      UNSOLD player.
-                      <br />
-                      A SOLD player cannot
-                      be entered again.
-                    </div>
                   </div>
                 )}
-
-                {/* CURRENT BID CONTROL */}
 
                 {c?.current_player && (
                   <div
@@ -2139,8 +2066,7 @@ function App() {
 
                     <div className="teamPool">
                       {
-                        c
-                          .current_player
+                        c.current_player
                           .name
                       }{' '}
                       • Bid History
@@ -2149,8 +2075,8 @@ function App() {
                     {currentPlayerBids.length ===
                     0 ? (
                       <div className="notice">
-                        No bids yet. Player
-                        is open at{' '}
+                        No bids yet. Player is
+                        open at{' '}
                         <b>3 EP</b>.
                       </div>
                     ) : (
@@ -2258,8 +2184,6 @@ function App() {
               </>
             )}
           </section>
-
-          {/* TEAM BALANCES */}
 
           <section>
             <div className="card">
@@ -2413,10 +2337,6 @@ function App() {
               {poolLabel(pool)}
             </b>
             .
-            <br />
-            Players from other
-            batch/gender pools are not
-            shown here.
           </div>
 
           <table className="table">
@@ -2433,53 +2353,55 @@ function App() {
             </thead>
 
             <tbody>
-              {players.map(p => (
-                <tr key={p.id}>
-                  <td>
-                    {p.roll_number}
-                  </td>
-
-                  <td>{p.name}</td>
-
-                  <td>
-                    {p.status ===
-                    'sold'
-                      ? 'SOLD'
-                      : p.status}
-                  </td>
-
-                  {mode === 'admin' && (
+              {players.map(
+                p => (
+                  <tr key={p.id}>
                     <td>
-                      <button
-                        className="danger"
-                        disabled={
-                          deletingPlayer ===
-                            p.id ||
-                          p.status ===
-                            'sold'
-                        }
-                        onClick={() =>
-                          deletePlayer(
-                            p.id
-                          )
-                        }
-                      >
-                        {p.status ===
-                        'sold'
-                          ? 'Sold'
-                          : deletingPlayer ===
-                            p.id
-                          ? 'Deleting…'
-                          : '🗑 Delete'}
-                      </button>
+                      {p.roll_number}
                     </td>
-                  )}
-                </tr>
-              ))}
+
+                    <td>
+                      {p.name}
+                    </td>
+
+                    <td>
+                      {p.status}
+                    </td>
+
+                    {mode === 'admin' && (
+                      <td>
+                        <button
+                          className="danger"
+                          disabled={
+                            deletingPlayer ===
+                              p.id ||
+                            p.status ===
+                              'sold'
+                          }
+                          onClick={() =>
+                            deletePlayer(
+                              p.id
+                            )
+                          }
+                        >
+                          {p.status ===
+                          'sold'
+                            ? 'Sold'
+                            : deletingPlayer ===
+                              p.id
+                            ? 'Deleting…'
+                            : '🗑 Delete'}
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                )
+              )}
             </tbody>
           </table>
 
-          {players.length === 0 && (
+          {players.length ===
+            0 && (
             <div className="notice">
               No players have been
               added to this pool yet.
@@ -2519,67 +2441,64 @@ function App() {
             </thead>
 
             <tbody>
-              {history.map(x => (
-                <tr key={x.id}>
-                  <td>
-                    {x.player
-                      ?.roll_number}{' '}
-                    —{' '}
-                    {x.player?.name}
-                  </td>
-
-                  <td>
-                    {x.status ===
-                    'SOLD'
-                      ? 'SOLD'
-                      : x.status}
-                  </td>
-
-                  <td>
-                    {x.team?.name ||
-                      '—'}
-                  </td>
-
-                  <td>
-                    {x.final_price
-                      ? `${x.final_price} EP`
-                      : '—'}
-                  </td>
-
-                  {mode === 'admin' && (
+              {history.map(
+                x => (
+                  <tr key={x.id}>
                     <td>
-                      {x.status ===
-                        'SOLD' && (
-                        <button
-                          className="danger"
-                          disabled={
-                            undoingSale ===
-                            x.id
-                          }
-                          onClick={() =>
-                            undoSoldPlayer(
-                              x.id
-                            )
-                          }
-                        >
-                          {undoingSale ===
-                          x.id
-                            ? 'Undoing…'
-                            : '↩ Undo Sale'}
-                        </button>
-                      )}
+                      {
+                        x.player
+                          ?.roll_number
+                      }{' '}
+                      —{' '}
+                      {
+                        x.player?.name
+                      }
                     </td>
-                  )}
-                </tr>
-              ))}
+
+                    <td>
+                      {x.status}
+                    </td>
+
+                    <td>
+                      {x.team?.name ||
+                        '—'}
+                    </td>
+
+                    <td>
+                      {x.final_price
+                        ? `${x.final_price} EP`
+                        : '—'}
+                    </td>
+
+                    {mode === 'admin' && (
+                      <td>
+                        {x.status ===
+                          'SOLD' && (
+                          <button
+                            className="danger"
+                            disabled={
+                              undoingSale ===
+                              x.id
+                            }
+                            onClick={() =>
+                              undoSoldPlayer(
+                                x.id
+                              )
+                            }
+                          >
+                            {undoingSale ===
+                            x.id
+                              ? 'Undoing…'
+                              : '↩ Undo Sale'}
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                )
+              )}
             </tbody>
           </table>
-
-          {history.length === 0 && (
-            <div className="notice">
-              No auction results yet.
-            </div>
-          )}
         </div>
       </>
     )
@@ -2593,38 +2512,40 @@ function App() {
     return (
       <>
         <Header
-          eyebrow="10 INDEPENDENT POOLS"
+          eyebrow="INDEPENDENT POOLS"
           title="POOLS"
           sub="Each team starts with 150 EP in every pool."
         />
 
         <div className="stats poolsGrid">
-          {pools.map(p => (
-            <div
-              className="stat"
-              key={p.id}
-            >
-              <span>
-                {poolLabel(p)}
-              </span>
+          {pools.map(
+            p => (
+              <div
+                className="stat"
+                key={p.id}
+              >
+                <span>
+                  {poolLabel(p)}
+                </span>
 
-              <b>
-                5 × 150 EP
-              </b>
+                <b>
+                  5 × 150 EP
+                </b>
 
-              <small>
-                Independent team
-                budgets
-              </small>
-            </div>
-          ))}
+                <small>
+                  Independent team
+                  budgets
+                </small>
+              </div>
+            )
+          )}
         </div>
       </>
     )
   }
 
   /* =========================================================
-     LOADING / SETUP
+     RENDER
   ========================================================= */
 
   if (loading) {
@@ -2638,10 +2559,6 @@ function App() {
   if (!supabaseConfigured) {
     return <SetupScreen />
   }
-
-  /* =========================================================
-     MAIN RENDER
-  ========================================================= */
 
   return (
     <div className="app">
@@ -2810,10 +2727,9 @@ function TeamDetails({
           </div>
 
           <div className="sub">
-            {viewMode === 'current'
-              ? `Players from ${poolLabel(
-                  pool
-                )}`
+            {viewMode ===
+            'current'
+              ? `Players from ${poolLabel(pool)}`
               : 'Players from all pools'}
           </div>
         </div>
@@ -2829,7 +2745,8 @@ function TeamDetails({
       <div
         className="actions"
         style={{
-          marginBottom: '16px'
+          marginBottom:
+            '16px'
         }}
       >
         <button
@@ -2840,7 +2757,9 @@ function TeamDetails({
               : 'btn'
           }
           onClick={() =>
-            setViewMode('current')
+            setViewMode(
+              'current'
+            )
           }
         >
           Current Pool
@@ -2863,7 +2782,8 @@ function TeamDetails({
       <div className="card">
         <div className="eyebrow">
           {selectedTeam} •{' '}
-          {viewMode === 'current'
+          {viewMode ===
+          'current'
             ? poolLabel(pool)
             : 'ALL POOLS'}
         </div>
@@ -2871,7 +2791,8 @@ function TeamDetails({
         <div
           className="teamPool"
           style={{
-            marginBottom: '12px'
+            marginBottom:
+              '12px'
           }}
         >
           {displayedPlayers.length}{' '}
@@ -2885,31 +2806,38 @@ function TeamDetails({
         {displayedPlayers.length ===
         0 ? (
           <div className="notice">
-            No players purchased by{' '}
-            {selectedTeam}{' '}
-            {viewMode === 'current'
-              ? `in ${poolLabel(
-                  pool
-                )}`
+            No players purchased
+            by {selectedTeam}{' '}
+            {viewMode ===
+            'current'
+              ? `in ${poolLabel(pool)}`
               : 'across any pool'}.
           </div>
         ) : (
           <table className="table">
             <thead>
               <tr>
-                {viewMode === 'all' && (
+                {viewMode ===
+                  'all' && (
                   <th>Pool</th>
                 )}
 
-                <th>Player</th>
-                <th>Price</th>
+                <th>
+                  Player
+                </th>
+
+                <th>
+                  Price
+                </th>
               </tr>
             </thead>
 
             <tbody>
               {displayedPlayers.map(
                 x => (
-                  <tr key={x.id}>
+                  <tr
+                    key={x.id}
+                  >
                     {viewMode ===
                       'all' && (
                       <td>
@@ -2926,7 +2854,8 @@ function TeamDetails({
                       }{' '}
                       —{' '}
                       {
-                        x.player?.name
+                        x.player
+                          ?.name
                       }
                     </td>
 
@@ -2966,9 +2895,7 @@ function TeamCard({
     >
       <div className="teamtop">
         <span
-          className={`teamname ${
-            TEAM_COLORS[name]
-          }`}
+          className={`teamname ${TEAM_COLORS[name]}`}
         >
           {name}
         </span>
@@ -2979,9 +2906,7 @@ function TeamCard({
       </div>
 
       <div
-        className={`bar ${
-          TEAM_COLORS[name]
-        }`}
+        className={`bar ${TEAM_COLORS[name]}`}
       >
         <i
           style={{
@@ -2989,7 +2914,8 @@ function TeamCard({
               0,
               Math.min(
                 100,
-                (balance / 150) *
+                (balance /
+                  150) *
                   100
               )
             )}%`
@@ -3091,8 +3017,8 @@ function Login({
         </div>
 
         <div className="sub">
-          Only authenticated admins can
-          run the auction.
+          Only authenticated admins
+          can run the auction.
         </div>
 
         <input
@@ -3144,7 +3070,7 @@ function Login({
 }
 
 /* =========================================================
-   SETUP SCREEN
+   SETUP
 ========================================================= */
 
 function SetupScreen() {
@@ -3158,10 +3084,11 @@ function SetupScreen() {
 
         <p className="sub">
           Add VITE_SUPABASE_URL and
-          VITE_SUPABASE_ANON_KEY to your
-          Vercel environment variables,
-          run the supplied SQL in
-          Supabase, then redeploy.
+          VITE_SUPABASE_ANON_KEY to
+          your Vercel environment
+          variables, run the supplied
+          SQL in Supabase, then
+          redeploy.
         </p>
       </div>
     </div>
@@ -3174,4 +3101,6 @@ function SetupScreen() {
 
 createRoot(
   document.getElementById('root')
-).render(<App />)
+).render(
+  <App />
+)
