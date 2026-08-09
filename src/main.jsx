@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+simport React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import './styles.css'
