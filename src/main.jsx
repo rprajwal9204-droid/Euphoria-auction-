@@ -280,15 +280,6 @@ function App() {
     setMode('public')
   }
 
-  /*
-   * NEXT PLAYER
-   *
-   * Type only the roll number.
-   *
-   * Available -> auction
-   * Unsold -> auction again
-   * Sold -> blocked
-   */
   async function startPlayerByRoll() {
     if (!session) {
       setLoginOpen(true)
@@ -336,18 +327,49 @@ function App() {
     await loadPool()
   }
 
+  /*
+   * =========================================================
+   * BIDDING
+   *
+   * FIRST BID = 3 EP
+   *
+   * We deliberately DO NOT use current_bid === 3
+   * to determine whether the first bid has happened.
+   *
+   * Instead, we check whether this player already has
+   * any bids.
+   * =========================================================
+   */
   async function bid(teamName) {
     const team = teamMap[teamName]
 
-    if (!team || !current) return
+    if (!team || !current?.current_player_id) {
+      return
+    }
 
-    const next = nextBid(current.current_bid ?? 3)
+    const playerBids = bids.filter(
+      b =>
+        b.player_id ===
+        current.current_player_id
+    )
+
+    /*
+     * No previous bids = FIRST BID = 3 EP
+     * Previous bids exist = normal next bid
+     */
+    const amount =
+      playerBids.length === 0
+        ? 3
+        : nextBid(
+            current.current_bid
+          )
 
     const { error } = await supabase.rpc(
-      'place_bid',
+      'manual_bid',
       {
         p_pool_id: pool.id,
-        p_team_id: team.id
+        p_team_id: team.id,
+        p_amount: amount
       }
     )
 
@@ -529,9 +551,6 @@ function App() {
     }
   }
 
-  /*
-   * DELETE PLAYER
-   */
   async function deletePlayer(playerId) {
     if (!session) {
       setLoginOpen(true)
@@ -586,20 +605,47 @@ function App() {
     )?.remaining_ep ?? 150
 
   /*
-   * IMPORTANT:
-   * First bid is 3.
-   * Only after a bid exists do we move to 4.
+   * BID INCREMENT
+   *
+   * This function is ONLY used AFTER the first bid.
+   *
+   * First bid:
+   *     3 EP
+   *
+   * Then:
+   *     4,5,6,7,8,9
+   *
+   * Then:
+   *     10,12,14...
+   *
+   * Then:
+   *     20,25,30...
    */
   const nextBid = b => {
-    const value = Number(b ?? 3)
+    const value = Number(b)
 
-    if (value === 3) return 4
-    if (value < 10) return value + 1
-    if (value < 20) return value + 2
+    if (!Number.isFinite(value)) {
+      return 3
+    }
+
+    if (value < 10) {
+      return value + 1
+    }
+
+    if (value < 20) {
+      return value + 2
+    }
 
     return value + 5
   }
 
+  /*
+   * Calculate the actual amount displayed on the
+   * team buttons.
+   *
+   * NO BIDS = 3
+   * HAS BIDS = next increment
+   */
   const currentPlayerBids =
     current?.current_player_id
       ? bids
@@ -627,6 +673,13 @@ function App() {
             )
           })
       : []
+
+  const displayedBidAmount =
+    currentPlayerBids.length === 0
+      ? 3
+      : nextBid(
+          current?.current_bid
+        )
 
   function currentPoolTeamPlayers(teamName) {
     if (!pool) return []
@@ -749,9 +802,7 @@ function App() {
                       disabled={
                         !c?.current_player ||
                         selectedBalance(name) <
-                          nextBid(
-                            c?.current_bid ?? 3
-                          )
+                          displayedBidAmount
                       }
                       onClick={() =>
                         bid(name)
@@ -767,9 +818,7 @@ function App() {
 
                       <small>
                         Bid{' '}
-                        {nextBid(
-                          c?.current_bid ?? 3
-                        )}{' '}
+                        {displayedBidAmount}{' '}
                         EP
                       </small>
                     </button>
@@ -1183,7 +1232,7 @@ function App() {
                         className="danger"
                         disabled={
                           deletingPlayer ===
-                          p.id ||
+                            p.id ||
                           p.status === 'sold'
                         }
                         onClick={() =>
