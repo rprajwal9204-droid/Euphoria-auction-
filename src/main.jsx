@@ -29,10 +29,6 @@ function App() {
   const [allHistory, setAllHistory] = useState([])
   const [bids, setBids] = useState([])
 
-  /* =========================================================
-     PREVIOUS PLAYER
-     This is deliberately kept separately from current.
-  ========================================================= */
   const [previousPlayer, setPreviousPlayer] = useState(null)
 
   const [selectedTeam, setSelectedTeam] = useState(null)
@@ -246,14 +242,6 @@ function App() {
     setHistory(hist.data || [])
     setBids(bidData.data || [])
 
-    /*
-     * =======================================================
-     * RESTORE PREVIOUS PLAYER AFTER REFRESH / RELOAD
-     * =======================================================
-     *
-     * Find the newest completed result which is not the
-     * currently active player.
-     */
     const currentPlayerId = state.data?.current_player_id
 
     const restoredPrevious =
@@ -313,16 +301,6 @@ function App() {
 
     if (!pool) return
 
-    /*
-     * IMPORTANT:
-     * The previous player is already stored in previousPlayer.
-     *
-     * We DO NOT clear it here.
-     *
-     * This is what makes the previous player remain visible
-     * while the new player is being auctioned.
-     */
-
     const roll = prompt('Roll number')
     if (!roll) return
 
@@ -376,10 +354,6 @@ function App() {
       return
     }
 
-    /*
-     * Save the current player BEFORE the RPC changes
-     * auction state.
-     */
     const playerBeingSold = current?.current_player
       ? {
           id: current.current_player.id,
@@ -400,9 +374,6 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
-      /*
-       * Immediately show the sold player as previous player.
-       */
       if (playerBeingSold) {
         setPreviousPlayer(playerBeingSold)
       }
@@ -423,10 +394,6 @@ function App() {
       return
     }
 
-    /*
-     * Save the current player BEFORE the RPC changes
-     * auction state.
-     */
     const playerBeingUnsold = current?.current_player
       ? {
           id: current.current_player.id,
@@ -447,9 +414,6 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
-      /*
-       * Immediately show the unsold player as previous player.
-       */
       if (playerBeingUnsold) {
         setPreviousPlayer(playerBeingUnsold)
       }
@@ -561,10 +525,6 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
-      /*
-       * If the player we just undid was being displayed as
-       * previous player, remove it.
-       */
       if (previousPlayer?.id === resultId) {
         setPreviousPlayer(null)
       }
@@ -686,9 +646,6 @@ function App() {
       return
     }
 
-    /*
-     * Save player before manual sale.
-     */
     const playerBeingSold = current?.current_player
       ? {
           id: current.current_player.id,
@@ -745,6 +702,24 @@ function App() {
         })
     : []
 
+  /*
+   * =========================================================
+   * CURRENT HIGHEST BIDDER
+   *
+   * Uses the live auction state first.
+   * Falls back to the latest bid if necessary.
+   * =========================================================
+   */
+  const highestBidderName =
+    current?.leader_team?.name ||
+    currentPlayerBids[currentPlayerBids.length - 1]?.team?.name ||
+    null
+
+  const highestBidAmount =
+    current?.current_bid ??
+    currentPlayerBids[currentPlayerBids.length - 1]?.amount ??
+    null
+
   function currentPoolTeamPlayers(teamName) {
     return history.filter(
       x =>
@@ -798,13 +773,7 @@ function App() {
             value={pool?.id || ''}
             onChange={e => {
               setSelectedTeam(null)
-
-              /*
-               * When changing pools, don't show a previous player
-               * from the old pool.
-               */
               setPreviousPlayer(null)
-
               setPool(pools.find(x => x.id === e.target.value))
             }}
           >
@@ -819,9 +788,7 @@ function App() {
         <div className="grid">
           <section>
 
-            {/* =================================================
-                CURRENT PLAYER
-            ================================================= */}
+            {/* CURRENT PLAYER */}
             <div className="card player">
               <div className="roll">
                 ROLL NO. {c?.current_player?.roll_number || '—'}
@@ -852,8 +819,93 @@ function App() {
             </div>
 
             {/* =================================================
-                PREVIOUS PLAYER
+                CURRENT HIGHEST BIDDER
             ================================================= */}
+            {c?.current_player && (
+              <div
+                className="card"
+                style={{
+                  marginTop: '16px',
+                  border: highestBidderName
+                    ? '1px solid rgba(255,255,255,.16)'
+                    : '1px solid rgba(255,255,255,.08)',
+                  textAlign: 'center'
+                }}
+              >
+                <div
+                  className="eyebrow"
+                  style={{
+                    letterSpacing: '1.5px'
+                  }}
+                >
+                  CURRENT HIGHEST BIDDER
+                </div>
+
+                {highestBidderName ? (
+                  <>
+                    <div
+                      style={{
+                        marginTop: '8px',
+                        fontSize: '26px',
+                        fontWeight: '900'
+                      }}
+                    >
+                      🏆{' '}
+                      <span
+                        className={
+                          TEAM_COLORS[highestBidderName] || ''
+                        }
+                      >
+                        {highestBidderName}
+                      </span>
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: '5px',
+                        fontSize: '18px',
+                        fontWeight: '800'
+                      }}
+                    >
+                      {highestBidAmount} EP
+                    </div>
+
+                    <div
+                      className="sub"
+                      style={{
+                        marginTop: '6px'
+                      }}
+                    >
+                      Leading for{' '}
+                      {c.current_player.name}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div
+                      style={{
+                        marginTop: '10px',
+                        fontSize: '20px',
+                        fontWeight: '800'
+                      }}
+                    >
+                      No bids yet
+                    </div>
+
+                    <div
+                      className="sub"
+                      style={{
+                        marginTop: '4px'
+                      }}
+                    >
+                      Player is open at 3 EP
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* PREVIOUS PLAYER */}
             {previousPlayer && (
               <div
                 className="card"
@@ -1646,9 +1698,7 @@ function App() {
         <aside className="side">
           <div className="nav">
             <Nav
-              active={
-                page === 'auction'
-              }
+              active={page === 'auction'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('auction')
@@ -1658,9 +1708,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'players'
-              }
+              active={page === 'players'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('players')
@@ -1670,9 +1718,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'teams'
-              }
+              active={page === 'teams'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('teams')
@@ -1682,9 +1728,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'history'
-              }
+              active={page === 'history'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('history')
@@ -1694,9 +1738,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'pools'
-              }
+              active={page === 'pools'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('pools')
@@ -1720,9 +1762,6 @@ function App() {
         </main>
       </div>
 
-      {/* =====================================================
-          MANUAL BID MODAL
-      ===================================================== */}
       {manualBidOpen && (
         <div className="modal">
           <div className="modalCard">
@@ -1738,16 +1777,11 @@ function App() {
               className="field"
               value={manualBidTeam}
               onChange={e =>
-                setManualBidTeam(
-                  e.target.value
-                )
+                setManualBidTeam(e.target.value)
               }
             >
               {TEAM_NAMES.map(name => (
-                <option
-                  key={name}
-                  value={name}
-                >
+                <option key={name} value={name}>
                   {name}
                 </option>
               ))}
@@ -1760,9 +1794,7 @@ function App() {
               placeholder="Bid amount"
               value={manualBidAmount}
               onChange={e =>
-                setManualBidAmount(
-                  e.target.value
-                )
+                setManualBidAmount(e.target.value)
               }
             />
 
@@ -1787,9 +1819,6 @@ function App() {
         </div>
       )}
 
-      {/* =====================================================
-          MANUAL SALE MODAL
-      ===================================================== */}
       {manualSaleOpen && (
         <div className="modal">
           <div className="modalCard">
@@ -1805,16 +1834,11 @@ function App() {
               className="field"
               value={manualSaleTeam}
               onChange={e =>
-                setManualSaleTeam(
-                  e.target.value
-                )
+                setManualSaleTeam(e.target.value)
               }
             >
               {TEAM_NAMES.map(name => (
-                <option
-                  key={name}
-                  value={name}
-                >
+                <option key={name} value={name}>
                   {name}
                 </option>
               ))}
@@ -1827,9 +1851,7 @@ function App() {
               placeholder="Sale price"
               value={manualSaleAmount}
               onChange={e =>
-                setManualSaleAmount(
-                  e.target.value
-                )
+                setManualSaleAmount(e.target.value)
               }
             />
 
@@ -1854,15 +1876,10 @@ function App() {
         </div>
       )}
 
-      {/* =====================================================
-          LOGIN
-      ===================================================== */}
       {loginOpen && (
         <Login
           onLogin={login}
-          onClose={() =>
-            setLoginOpen(false)
-          }
+          onClose={() => setLoginOpen(false)}
         />
       )}
 
@@ -1964,9 +1981,7 @@ function Nav({
 }) {
   return (
     <button
-      className={
-        active ? 'active' : ''
-      }
+      className={active ? 'active' : ''}
       onClick={onClick}
     >
       {children}
@@ -2028,10 +2043,7 @@ function Login({
           <button
             className="btn primary"
             onClick={() =>
-              onLogin(
-                email,
-                password
-              )
+              onLogin(email, password)
             }
           >
             Login
