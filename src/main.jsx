@@ -29,6 +29,12 @@ function App() {
   const [allHistory, setAllHistory] = useState([])
   const [bids, setBids] = useState([])
 
+  /* =========================================================
+     PREVIOUS PLAYER
+     This is deliberately kept separately from current.
+  ========================================================= */
+  const [previousPlayer, setPreviousPlayer] = useState(null)
+
   const [selectedTeam, setSelectedTeam] = useState(null)
   const [teamViewMode, setTeamViewMode] = useState('all')
 
@@ -231,12 +237,38 @@ function App() {
     if (hist.error) notify(hist.error.message)
     if (bidData.error) notify(bidData.error.message)
 
-    if (state.data) setCurrent(state.data)
+    if (state.data) {
+      setCurrent(state.data)
+    }
 
     setBalances(bal.data || [])
     setPlayers(ps.data || [])
     setHistory(hist.data || [])
     setBids(bidData.data || [])
+
+    /*
+     * =======================================================
+     * RESTORE PREVIOUS PLAYER AFTER REFRESH / RELOAD
+     * =======================================================
+     *
+     * Find the newest completed result which is not the
+     * currently active player.
+     */
+    const currentPlayerId = state.data?.current_player_id
+
+    const restoredPrevious =
+      (hist.data || []).find(result => {
+        const status = String(result.status || '').toUpperCase()
+
+        return (
+          (status === 'SOLD' || status === 'UNSOLD') &&
+          result.player_id !== currentPlayerId
+        )
+      }) || null
+
+    if (restoredPrevious) {
+      setPreviousPlayer(restoredPrevious)
+    }
 
     const { data: completeHistory, error: completeError } =
       await supabase
@@ -280,6 +312,16 @@ function App() {
     }
 
     if (!pool) return
+
+    /*
+     * IMPORTANT:
+     * The previous player is already stored in previousPlayer.
+     *
+     * We DO NOT clear it here.
+     *
+     * This is what makes the previous player remain visible
+     * while the new player is being auctioned.
+     */
 
     const roll = prompt('Roll number')
     if (!roll) return
@@ -334,6 +376,23 @@ function App() {
       return
     }
 
+    /*
+     * Save the current player BEFORE the RPC changes
+     * auction state.
+     */
+    const playerBeingSold = current?.current_player
+      ? {
+          id: current.current_player.id,
+          player_id: current.current_player.id,
+          player: current.current_player,
+          status: 'SOLD',
+          final_price: current.current_bid,
+          team: current.leader_team || null,
+          team_id: current.leader_team_id,
+          created_at: new Date().toISOString()
+        }
+      : null
+
     const { error } = await supabase.rpc('sell_current_player', {
       p_pool_id: pool.id
     })
@@ -341,6 +400,13 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
+      /*
+       * Immediately show the sold player as previous player.
+       */
+      if (playerBeingSold) {
+        setPreviousPlayer(playerBeingSold)
+      }
+
       notify('Player SOLD')
       await loadPool()
     }
@@ -357,6 +423,23 @@ function App() {
       return
     }
 
+    /*
+     * Save the current player BEFORE the RPC changes
+     * auction state.
+     */
+    const playerBeingUnsold = current?.current_player
+      ? {
+          id: current.current_player.id,
+          player_id: current.current_player.id,
+          player: current.current_player,
+          status: 'UNSOLD',
+          final_price: null,
+          team: null,
+          team_id: null,
+          created_at: new Date().toISOString()
+        }
+      : null
+
     const { error } = await supabase.rpc('mark_unsold', {
       p_pool_id: pool.id
     })
@@ -364,6 +447,13 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
+      /*
+       * Immediately show the unsold player as previous player.
+       */
+      if (playerBeingUnsold) {
+        setPreviousPlayer(playerBeingUnsold)
+      }
+
       notify('Player UNSOLD')
       await loadPool()
     }
@@ -445,7 +535,7 @@ function App() {
 
     const result = history.find(x => x.id === resultId)
 
-    if (!result || result.status !== 'SOLD') {
+    if (!result || String(result.status).toUpperCase() !== 'SOLD') {
       notify('Only SOLD players can be undone')
       return
     }
@@ -471,6 +561,14 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
+      /*
+       * If the player we just undid was being displayed as
+       * previous player, remove it.
+       */
+      if (previousPlayer?.id === resultId) {
+        setPreviousPlayer(null)
+      }
+
       notify(`${result.final_price} EP refunded`)
       await loadPool()
     }
@@ -588,6 +686,22 @@ function App() {
       return
     }
 
+    /*
+     * Save player before manual sale.
+     */
+    const playerBeingSold = current?.current_player
+      ? {
+          id: current.current_player.id,
+          player_id: current.current_player.id,
+          player: current.current_player,
+          status: 'SOLD',
+          final_price: amount,
+          team,
+          team_id: team.id,
+          created_at: new Date().toISOString()
+        }
+      : null
+
     const { error } = await supabase.rpc('manual_sell_current_player', {
       p_pool_id: pool.id,
       p_team_id: team.id,
@@ -597,6 +711,10 @@ function App() {
     if (error) {
       notify(error.message)
       return
+    }
+
+    if (playerBeingSold) {
+      setPreviousPlayer(playerBeingSold)
     }
 
     setManualSaleAmount('')
@@ -627,32 +745,10 @@ function App() {
         })
     : []
 
-  /*
-   * =========================================================
-   * PREVIOUS PLAYER
-   * =========================================================
-   *
-   * Find the newest completed result for this pool.
-   *
-   * Only SOLD and UNSOLD results are considered.
-   *
-   * If the current player has already been removed from
-   * auction_states after being completed, the latest result
-   * is the previous player.
-   *
-   * If a result somehow still points to the current player,
-   * skip it so the current player is never shown as previous.
-   */
-  const previousPlayer = history.find(
-    x =>
-      (x.status === 'SOLD' || x.status === 'UNSOLD') &&
-      x.player_id !== current?.current_player_id
-  )
-
   function currentPoolTeamPlayers(teamName) {
     return history.filter(
       x =>
-        x.status === 'SOLD' &&
+        String(x.status || '').toUpperCase() === 'SOLD' &&
         x.team?.name === teamName
     )
   }
@@ -660,7 +756,7 @@ function App() {
   function allPoolTeamPlayers(teamName) {
     return allHistory.filter(
       x =>
-        x.status === 'SOLD' &&
+        String(x.status || '').toUpperCase() === 'SOLD' &&
         x.team?.name === teamName
     )
   }
@@ -702,6 +798,13 @@ function App() {
             value={pool?.id || ''}
             onChange={e => {
               setSelectedTeam(null)
+
+              /*
+               * When changing pools, don't show a previous player
+               * from the old pool.
+               */
+              setPreviousPlayer(null)
+
               setPool(pools.find(x => x.id === e.target.value))
             }}
           >
@@ -715,7 +818,10 @@ function App() {
 
         <div className="grid">
           <section>
-            {/* CURRENT PLAYER */}
+
+            {/* =================================================
+                CURRENT PLAYER
+            ================================================= */}
             <div className="card player">
               <div className="roll">
                 ROLL NO. {c?.current_player?.roll_number || '—'}
@@ -747,7 +853,7 @@ function App() {
 
             {/* =================================================
                 PREVIOUS PLAYER
-                ================================================= */}
+            ================================================= */}
             {previousPlayer && (
               <div
                 className="card"
@@ -767,14 +873,18 @@ function App() {
                     fontWeight: '800'
                   }}
                 >
-                  {previousPlayer.player?.name || 'Unknown Player'}
+                  {previousPlayer.player?.name ||
+                    'Unknown Player'}
                 </div>
 
                 <div
                   className="sub"
-                  style={{ marginTop: '4px' }}
+                  style={{
+                    marginTop: '4px'
+                  }}
                 >
-                  ROLL NO. {previousPlayer.player?.roll_number || '—'}
+                  ROLL NO.{' '}
+                  {previousPlayer.player?.roll_number || '—'}
                 </div>
 
                 <div
@@ -793,8 +903,12 @@ function App() {
                       fontSize: '18px'
                     }}
                   >
-                    {previousPlayer.status === 'SOLD'
-                      ? `🏆 ${previousPlayer.team?.name || 'Unknown Team'}`
+                    {String(previousPlayer.status).toUpperCase() ===
+                    'SOLD'
+                      ? `🏆 ${
+                          previousPlayer.team?.name ||
+                          'Unknown Team'
+                        }`
                       : '🔴 UNSOLD'}
                   </div>
 
@@ -804,7 +918,8 @@ function App() {
                       fontSize: '18px'
                     }}
                   >
-                    {previousPlayer.status === 'SOLD'
+                    {String(previousPlayer.status).toUpperCase() ===
+                    'SOLD'
                       ? `${previousPlayer.final_price ?? 0} EP`
                       : '—'}
                   </div>
@@ -817,7 +932,8 @@ function App() {
                     opacity: 0.65
                   }}
                 >
-                  {previousPlayer.status === 'SOLD'
+                  {String(previousPlayer.status).toUpperCase() ===
+                  'SOLD'
                     ? 'Player sold successfully'
                     : 'Player remained unsold'}
                 </div>
@@ -878,10 +994,13 @@ function App() {
                   </button>
                 </div>
 
+                {/* MANUAL CONTROLS */}
                 {c?.current_player && (
                   <div
                     className="card"
-                    style={{ marginTop: '16px' }}
+                    style={{
+                      marginTop: '16px'
+                    }}
                   >
                     <div className="eyebrow">
                       MANUAL AUCTION CONTROL
@@ -893,17 +1012,24 @@ function App() {
 
                     <div
                       className="actions"
-                      style={{ marginTop: '12px' }}
+                      style={{
+                        marginTop: '12px'
+                      }}
                     >
                       <button
                         className="btn primary"
                         onClick={() => {
                           setManualBidTeam(
-                            c?.leader_team?.name || 'Falcons'
+                            c?.leader_team?.name ||
+                              'Falcons'
                           )
+
                           setManualBidAmount(
-                            String(c?.current_bid ?? 3)
+                            String(
+                              c?.current_bid ?? 3
+                            )
                           )
+
                           setManualBidOpen(true)
                         }}
                       >
@@ -914,11 +1040,16 @@ function App() {
                         className="btn success"
                         onClick={() => {
                           setManualSaleTeam(
-                            c?.leader_team?.name || 'Falcons'
+                            c?.leader_team?.name ||
+                              'Falcons'
                           )
+
                           setManualSaleAmount(
-                            String(c?.current_bid ?? 3)
+                            String(
+                              c?.current_bid ?? 3
+                            )
                           )
+
                           setManualSaleOpen(true)
                         }}
                       >
@@ -928,10 +1059,13 @@ function App() {
                   </div>
                 )}
 
+                {/* BID HISTORY */}
                 {c?.current_player && (
                   <div
                     className="card"
-                    style={{ marginTop: '16px' }}
+                    style={{
+                      marginTop: '16px'
+                    }}
                   >
                     <div className="eyebrow">
                       ADMIN BID CONTROL
@@ -960,7 +1094,8 @@ function App() {
                               key={b.id}
                               style={{
                                 display: 'flex',
-                                justifyContent: 'space-between',
+                                justifyContent:
+                                  'space-between',
                                 alignItems: 'center',
                                 gap: '10px',
                                 padding: '10px 12px',
@@ -971,12 +1106,15 @@ function App() {
                             >
                               <div>
                                 <strong>
-                                  {b.team?.name || 'Unknown Team'}
+                                  {b.team?.name ||
+                                    'Unknown Team'}
                                 </strong>
 
                                 <div
                                   className="sub"
-                                  style={{ marginTop: '2px' }}
+                                  style={{
+                                    marginTop: '2px'
+                                  }}
                                 >
                                   {b.amount} EP
                                 </div>
@@ -984,8 +1122,12 @@ function App() {
 
                               <button
                                 className="danger"
-                                disabled={deletingBid === b.id}
-                                onClick={() => deleteBid(b.id)}
+                                disabled={
+                                  deletingBid === b.id
+                                }
+                                onClick={() =>
+                                  deleteBid(b.id)
+                                }
                               >
                                 {deletingBid === b.id
                                   ? 'Deleting…'
@@ -997,7 +1139,9 @@ function App() {
 
                         <div
                           className="actions"
-                          style={{ marginTop: '12px' }}
+                          style={{
+                            marginTop: '12px'
+                          }}
                         >
                           <button
                             className="danger"
@@ -1089,7 +1233,9 @@ function App() {
 
           <div
             className="actions"
-            style={{ marginBottom: '16px' }}
+            style={{
+              marginBottom: '16px'
+            }}
           >
             <button
               className={
@@ -1097,7 +1243,9 @@ function App() {
                   ? 'btn primary'
                   : 'btn'
               }
-              onClick={() => setTeamViewMode('current')}
+              onClick={() =>
+                setTeamViewMode('current')
+              }
             >
               Current Pool
             </button>
@@ -1108,7 +1256,9 @@ function App() {
                   ? 'btn primary'
                   : 'btn'
               }
-              onClick={() => setTeamViewMode('all')}
+              onClick={() =>
+                setTeamViewMode('all')
+              }
             >
               All Pools
             </button>
@@ -1124,10 +1274,15 @@ function App() {
 
             <div
               className="teamPool"
-              style={{ marginBottom: '12px' }}
+              style={{
+                marginBottom: '12px'
+              }}
             >
               {displayedPlayers.length}{' '}
-              player{displayedPlayers.length === 1 ? '' : 's'}
+              player
+              {displayedPlayers.length === 1
+                ? ''
+                : 's'}
             </div>
 
             {displayedPlayers.length === 0 ? (
@@ -1138,7 +1293,10 @@ function App() {
               <table className="table">
                 <thead>
                   <tr>
-                    {teamViewMode === 'all' && <th>Pool</th>}
+                    {teamViewMode === 'all' && (
+                      <th>Pool</th>
+                    )}
+
                     <th>Player</th>
                     <th>Price</th>
                     <th>Status</th>
@@ -1203,12 +1361,17 @@ function App() {
                   textAlign: 'left'
                 }}
               >
-                <span className={TEAM_COLORS[name]}>
+                <span
+                  className={
+                    TEAM_COLORS[name]
+                  }
+                >
                   {name}
                 </span>
 
                 <b>
-                  {count} player{count === 1 ? '' : 's'}
+                  {count} player
+                  {count === 1 ? '' : 's'}
                 </b>
 
                 <small>
@@ -1233,7 +1396,8 @@ function App() {
 
         <div className="card">
           <div className="notice">
-            Selected pool: <b>{poolLabel(pool)}</b>
+            Selected pool:{' '}
+            <b>{poolLabel(pool)}</b>
           </div>
 
           <table className="table">
@@ -1266,7 +1430,9 @@ function App() {
                       {p.status === 'unsold' && (
                         <button
                           className="btn primary"
-                          onClick={() => relist(p.id)}
+                          onClick={() =>
+                            relist(p.id)
+                          }
                         >
                           ↻ Relist
                         </button>
@@ -1276,13 +1442,15 @@ function App() {
                         <button
                           className="danger"
                           disabled={
-                            deletingPlayer === p.id
+                            deletingPlayer ===
+                            p.id
                           }
                           onClick={() =>
                             deletePlayer(p.id)
                           }
                         >
-                          {deletingPlayer === p.id
+                          {deletingPlayer ===
+                          p.id
                             ? 'Deleting…'
                             : '🗑 Delete'}
                         </button>
@@ -1315,7 +1483,9 @@ function App() {
                 <th>Result</th>
                 <th>Team</th>
                 <th>Price</th>
-                {mode === 'admin' && <th>Action</th>}
+                {mode === 'admin' && (
+                  <th>Action</th>
+                )}
               </tr>
             </thead>
 
@@ -1341,27 +1511,39 @@ function App() {
 
                   {mode === 'admin' && (
                     <td>
-                      {x.status === 'SOLD' && (
+                      {String(
+                        x.status
+                      ).toUpperCase() ===
+                        'SOLD' && (
                         <button
                           className="danger"
                           disabled={
-                            undoingSale === x.id
+                            undoingSale ===
+                            x.id
                           }
                           onClick={() =>
-                            undoSoldPlayer(x.id)
+                            undoSoldPlayer(
+                              x.id
+                            )
                           }
                         >
-                          {undoingSale === x.id
+                          {undoingSale ===
+                          x.id
                             ? 'Undoing…'
                             : '↩ Undo Sale'}
                         </button>
                       )}
 
-                      {x.status === 'UNSOLD' && (
+                      {String(
+                        x.status
+                      ).toUpperCase() ===
+                        'UNSOLD' && (
                         <button
                           className="btn primary"
                           onClick={() =>
-                            relist(x.player_id)
+                            relist(
+                              x.player_id
+                            )
                           }
                         >
                           ↻ Relist
@@ -1464,7 +1646,9 @@ function App() {
         <aside className="side">
           <div className="nav">
             <Nav
-              active={page === 'auction'}
+              active={
+                page === 'auction'
+              }
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('auction')
@@ -1474,7 +1658,9 @@ function App() {
             </Nav>
 
             <Nav
-              active={page === 'players'}
+              active={
+                page === 'players'
+              }
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('players')
@@ -1484,7 +1670,9 @@ function App() {
             </Nav>
 
             <Nav
-              active={page === 'teams'}
+              active={
+                page === 'teams'
+              }
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('teams')
@@ -1494,7 +1682,9 @@ function App() {
             </Nav>
 
             <Nav
-              active={page === 'history'}
+              active={
+                page === 'history'
+              }
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('history')
@@ -1504,7 +1694,9 @@ function App() {
             </Nav>
 
             <Nav
-              active={page === 'pools'}
+              active={
+                page === 'pools'
+              }
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('pools')
@@ -1528,6 +1720,9 @@ function App() {
         </main>
       </div>
 
+      {/* =====================================================
+          MANUAL BID MODAL
+      ===================================================== */}
       {manualBidOpen && (
         <div className="modal">
           <div className="modalCard">
@@ -1543,11 +1738,16 @@ function App() {
               className="field"
               value={manualBidTeam}
               onChange={e =>
-                setManualBidTeam(e.target.value)
+                setManualBidTeam(
+                  e.target.value
+                )
               }
             >
               {TEAM_NAMES.map(name => (
-                <option key={name} value={name}>
+                <option
+                  key={name}
+                  value={name}
+                >
                   {name}
                 </option>
               ))}
@@ -1560,7 +1760,9 @@ function App() {
               placeholder="Bid amount"
               value={manualBidAmount}
               onChange={e =>
-                setManualBidAmount(e.target.value)
+                setManualBidAmount(
+                  e.target.value
+                )
               }
             />
 
@@ -1585,6 +1787,9 @@ function App() {
         </div>
       )}
 
+      {/* =====================================================
+          MANUAL SALE MODAL
+      ===================================================== */}
       {manualSaleOpen && (
         <div className="modal">
           <div className="modalCard">
@@ -1600,11 +1805,16 @@ function App() {
               className="field"
               value={manualSaleTeam}
               onChange={e =>
-                setManualSaleTeam(e.target.value)
+                setManualSaleTeam(
+                  e.target.value
+                )
               }
             >
               {TEAM_NAMES.map(name => (
-                <option key={name} value={name}>
+                <option
+                  key={name}
+                  value={name}
+                >
                   {name}
                 </option>
               ))}
@@ -1617,7 +1827,9 @@ function App() {
               placeholder="Sale price"
               value={manualSaleAmount}
               onChange={e =>
-                setManualSaleAmount(e.target.value)
+                setManualSaleAmount(
+                  e.target.value
+                )
               }
             />
 
@@ -1642,6 +1854,9 @@ function App() {
         </div>
       )}
 
+      {/* =====================================================
+          LOGIN
+      ===================================================== */}
       {loginOpen && (
         <Login
           onLogin={login}
@@ -1669,11 +1884,15 @@ function TeamCard({
     <div
       className="team"
       onClick={onClick}
-      style={{ cursor: 'pointer' }}
+      style={{
+        cursor: 'pointer'
+      }}
     >
       <div className="teamtop">
         <span
-          className={`teamname ${TEAM_COLORS[name]}`}
+          className={`teamname ${
+            TEAM_COLORS[name]
+          }`}
         >
           {name}
         </span>
@@ -1684,7 +1903,9 @@ function TeamCard({
       </div>
 
       <div
-        className={`bar ${TEAM_COLORS[name]}`}
+        className={`bar ${
+          TEAM_COLORS[name]
+        }`}
       >
         <i
           style={{
@@ -1743,7 +1964,9 @@ function Nav({
 }) {
   return (
     <button
-      className={active ? 'active' : ''}
+      className={
+        active ? 'active' : ''
+      }
       onClick={onClick}
     >
       {children}
@@ -1805,7 +2028,10 @@ function Login({
           <button
             className="btn primary"
             onClick={() =>
-              onLogin(email, password)
+              onLogin(
+                email,
+                password
+              )
             }
           >
             Login
