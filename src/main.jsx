@@ -12,6 +12,8 @@ const TEAM_COLORS = {
 }
 
 const TEAM_NAMES = Object.keys(TEAM_COLORS)
+const BATCHES = [2021, 2022, 2023, 2024, 2025]
+const GENDERS = ['Male', 'Female']
 
 function App() {
   const [mode, setMode] = useState('public')
@@ -29,8 +31,6 @@ function App() {
   const [allHistory, setAllHistory] = useState([])
   const [bids, setBids] = useState([])
 
-  const [previousPlayer, setPreviousPlayer] = useState(null)
-
   const [selectedTeam, setSelectedTeam] = useState(null)
   const [teamViewMode, setTeamViewMode] = useState('all')
 
@@ -43,13 +43,14 @@ function App() {
   const [undoingSale, setUndoingSale] = useState(null)
   const [deletingPlayer, setDeletingPlayer] = useState(null)
 
-  const [manualBidOpen, setManualBidOpen] = useState(false)
-  const [manualBidTeam, setManualBidTeam] = useState('Falcons')
-  const [manualBidAmount, setManualBidAmount] = useState('')
+  const [manualAddOpen, setManualAddOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
 
-  const [manualSaleOpen, setManualSaleOpen] = useState(false)
-  const [manualSaleTeam, setManualSaleTeam] = useState('Falcons')
-  const [manualSaleAmount, setManualSaleAmount] = useState('')
+  const [newBatch, setNewBatch] = useState(2024)
+  const [newGender, setNewGender] = useState('Male')
+  const [newRoll, setNewRoll] = useState('')
+  const [newName, setNewName] = useState('')
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
@@ -227,36 +228,21 @@ function App() {
         .order('id', { ascending: false })
     ])
 
-    if (state.error) notify(state.error.message)
+    if (state.error && state.error.code !== 'PGRST116') {
+      notify(state.error.message)
+    }
+
     if (bal.error) notify(bal.error.message)
     if (ps.error) notify(ps.error.message)
     if (hist.error) notify(hist.error.message)
     if (bidData.error) notify(bidData.error.message)
 
-    if (state.data) {
-      setCurrent(state.data)
-    }
+    if (state.data) setCurrent(state.data)
 
     setBalances(bal.data || [])
     setPlayers(ps.data || [])
     setHistory(hist.data || [])
     setBids(bidData.data || [])
-
-    const currentPlayerId = state.data?.current_player_id
-
-    const restoredPrevious =
-      (hist.data || []).find(result => {
-        const status = String(result.status || '').toUpperCase()
-
-        return (
-          (status === 'SOLD' || status === 'UNSOLD') &&
-          result.player_id !== currentPlayerId
-        )
-      }) || null
-
-    if (restoredPrevious) {
-      setPreviousPlayer(restoredPrevious)
-    }
 
     const { data: completeHistory, error: completeError } =
       await supabase
@@ -293,48 +279,328 @@ function App() {
     setMode('public')
   }
 
+  /*
+   * =========================================================
+   * ADD PLAYER MANUALLY
+   * =========================================================
+   */
+
+  async function addPlayerManually() {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (!newRoll.trim()) {
+      notify('Enter roll number')
+      return
+    }
+
+    if (!newName.trim()) {
+      notify('Enter player name')
+      return
+    }
+
+    const targetPool = pools.find(
+      p =>
+        p.batch_year === Number(newBatch) &&
+        p.gender === newGender
+    )
+
+    if (!targetPool) {
+      notify('That pool does not exist')
+      return
+    }
+
+    const { data, error } = await supabase.rpc(
+      'add_player_manual',
+      {
+        p_pool_id: targetPool.id,
+        p_roll_number: newRoll.trim(),
+        p_name: newName.trim()
+      }
+    )
+
+    if (error) {
+      notify(error.message)
+      return
+    }
+
+    setNewRoll('')
+    setNewName('')
+    setManualAddOpen(false)
+
+    notify(
+      `${newName.trim()} added to ${poolLabel(targetPool)}`
+    )
+
+    if (pool?.id === targetPool.id) {
+      await loadPool()
+    } else {
+      await loadBase()
+      await loadPool()
+    }
+
+    return data
+  }
+
+  /*
+   * =========================================================
+   * CSV IMPORT
+   * =========================================================
+   */
+
+  function parseCSV(text) {
+    const lines = text
+      .replace(/\r/g, '')
+      .split('\n')
+      .filter(line => line.trim())
+
+    if (!lines.length) {
+      throw new Error('CSV file is empty')
+    }
+
+    const headers = lines[0]
+      .split(',')
+      .map(x => x.trim().toLowerCase().replace(/\s+/g, '_'))
+
+    const required = ['batch', 'gender', 'roll_number', 'name']
+
+    for (const key of required) {
+      if (!headers.includes(key)) {
+        throw new Error(
+          `Missing column "${key}". Required: batch, gender, roll_number, name`
+        )
+      }
+    }
+
+    const result = []
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',')
+
+      const row = {}
+
+      headers.forEach((header, index) => {
+        row[header] = (values[index] || '').trim()
+      })
+
+      if (
+        row.batch ||
+        row.gender ||
+        row.roll_number ||
+        row.name
+      ) {
+        result.push({
+          batch: row.batch,
+          gender: row.gender,
+          roll_number: row.roll_number,
+          name: row.name
+        })
+      }
+    }
+
+    return result
+  }
+
+  async function importCSV(file) {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (!file) return
+
+    try {
+      setImporting(true)
+
+      const text = await file.text()
+      const rows = parseCSV(text)
+
+      if (!rows.length) {
+        notify('No players found in CSV')
+        setImporting(false)
+        return
+      }
+
+      const { data, error } = await supabase.rpc(
+        'import_players',
+        {
+          p_players: rows
+        }
+      )
+
+      if (error) {
+        notify(error.message)
+        setImporting(false)
+        return
+      }
+
+      notify(
+        `Import complete • ${data?.added ?? 0} added • ${data?.skipped ?? 0} skipped`
+      )
+
+      setImportOpen(false)
+      await loadPool()
+    } catch (err) {
+      notify(err.message || 'Could not read CSV')
+    }
+
+    setImporting(false)
+  }
+
+  /*
+   * =========================================================
+   * DELETE PLAYER
+   * =========================================================
+   */
+
+  async function deletePlayer(player) {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (player.status === 'sold') {
+      notify('Undo the sale before deleting this player')
+      return
+    }
+
+    if (player.status === 'live') {
+      notify('You cannot delete the live player')
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${player.name} (${player.roll_number})?\n\nThis removes the player from the Players list.`
+    )
+
+    if (!confirmed) return
+
+    setDeletingPlayer(player.id)
+
+    /*
+     * This uses the delete_player RPC from your existing setup.
+     */
+    const { error } = await supabase.rpc(
+      'delete_player',
+      {
+        p_player_id: player.id
+      }
+    )
+
+    setDeletingPlayer(null)
+
+    if (error) {
+      notify(error.message)
+    } else {
+      notify('Player deleted')
+      await loadPool()
+    }
+  }
+
+  /*
+   * =========================================================
+   * AUCTION
+   * =========================================================
+   */
+
+  async function startExistingPlayer(playerId) {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (current?.current_player_id) {
+      notify('Finish the current player first')
+      return
+    }
+
+    const { error } = await supabase.rpc(
+      'start_existing_player',
+      {
+        p_player_id: playerId
+      }
+    )
+
+    if (error) {
+      notify(error.message)
+    } else {
+      notify('Player is LIVE')
+      await loadPool()
+    }
+  }
+
   async function startPlayer() {
     if (!session) {
       setLoginOpen(true)
       return
     }
 
-    if (!pool) return
-
-    const roll = prompt('Roll number')
-    if (!roll) return
-
-    const name = prompt('Player name')
-    if (!name) return
-
-    const { error } = await supabase.rpc('start_player', {
-      p_pool_id: pool.id,
-      p_roll_number: roll,
-      p_name: name
-    })
-
-    if (error) {
-      notify(error.message)
-    } else {
-      notify('Player added')
-      await loadPool()
-    }
-  }
-
-  async function bid(teamName) {
-    if (!session) {
-      setLoginOpen(true)
+    if (current?.current_player_id) {
+      notify('Finish the current player first')
       return
     }
 
+    const available = players.filter(
+      p => p.status === 'available'
+    )
+
+    if (!available.length) {
+      notify(`No available players in ${poolLabel(pool)}`)
+      return
+    }
+
+    const options = available
+      .map(
+        (p, i) =>
+          `${i + 1}. ${p.roll_number} — ${p.name}`
+      )
+      .join('\n')
+
+    const answer = window.prompt(
+      `Select player number:\n\n${options}\n\nEnter number:`
+    )
+
+    if (!answer) return
+
+    const index = Number(answer) - 1
+
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= available.length
+    ) {
+      notify('Invalid player number')
+      return
+    }
+
+    await startExistingPlayer(available[index].id)
+  }
+
+  async function bid(teamName) {
+    if (!current?.current_player_id) return
+
     const team = teamMap[teamName]
+    if (!team) return
 
-    if (!team || !current?.current_player_id) return
+    const firstBid = current.leader_team_id == null
 
-    const { error } = await supabase.rpc('place_bid', {
-      p_pool_id: pool.id,
-      p_team_id: team.id
-    })
+    /*
+     * IMPORTANT:
+     * First bid is exactly 3 EP.
+     */
+    const amount = firstBid
+      ? 3
+      : nextBid(current.current_bid)
+
+    const { error } = await supabase.rpc(
+      'place_bid',
+      {
+        p_pool_id: pool.id,
+        p_team_id: team.id
+      }
+    )
 
     if (error) {
       notify(error.message)
@@ -344,80 +610,42 @@ function App() {
   }
 
   async function sold() {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
     if (!current?.leader_team_id) {
       notify('Player has no winning team')
       return
     }
 
-    const playerBeingSold = current?.current_player
-      ? {
-          id: current.current_player.id,
-          player_id: current.current_player.id,
-          player: current.current_player,
-          status: 'SOLD',
-          final_price: current.current_bid,
-          team: current.leader_team || null,
-          team_id: current.leader_team_id,
-          created_at: new Date().toISOString()
-        }
-      : null
-
-    const { error } = await supabase.rpc('sell_current_player', {
-      p_pool_id: pool.id
-    })
+    const { error } = await supabase.rpc(
+      'sell_current_player',
+      {
+        p_pool_id: pool.id
+      }
+    )
 
     if (error) {
       notify(error.message)
     } else {
-      if (playerBeingSold) {
-        setPreviousPlayer(playerBeingSold)
-      }
-
       notify('Player SOLD')
       await loadPool()
     }
   }
 
   async function unsold() {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
     if (!current?.current_player_id) {
       notify('No live player')
       return
     }
 
-    const playerBeingUnsold = current?.current_player
-      ? {
-          id: current.current_player.id,
-          player_id: current.current_player.id,
-          player: current.current_player,
-          status: 'UNSOLD',
-          final_price: null,
-          team: null,
-          team_id: null,
-          created_at: new Date().toISOString()
-        }
-      : null
-
-    const { error } = await supabase.rpc('mark_unsold', {
-      p_pool_id: pool.id
-    })
+    const { error } = await supabase.rpc(
+      'mark_unsold',
+      {
+        p_pool_id: pool.id
+      }
+    )
 
     if (error) {
       notify(error.message)
     } else {
-      if (playerBeingUnsold) {
-        setPreviousPlayer(playerBeingUnsold)
-      }
-
       notify('Player UNSOLD')
       await loadPool()
     }
@@ -429,9 +657,12 @@ function App() {
       return
     }
 
-    const { error } = await supabase.rpc('relist_player', {
-      p_player_id: id
-    })
+    const { error } = await supabase.rpc(
+      'relist_player',
+      {
+        p_player_id: id
+      }
+    )
 
     if (error) {
       notify(error.message)
@@ -441,19 +672,32 @@ function App() {
     }
   }
 
+  /*
+   * =========================================================
+   * BID UNDO
+   * =========================================================
+   */
+
   async function deleteBid(id) {
     if (!session) {
       setLoginOpen(true)
       return
     }
 
-    if (!window.confirm('Delete this bid?')) return
+    const confirmed = window.confirm(
+      'Delete this bid?\n\nOnly this bid will be removed.'
+    )
+
+    if (!confirmed) return
 
     setDeletingBid(id)
 
-    const { error } = await supabase.rpc('delete_bid', {
-      p_bid_id: id
-    })
+    const { error } = await supabase.rpc(
+      'delete_bid',
+      {
+        p_bid_id: id
+      }
+    )
 
     setDeletingBid(null)
 
@@ -471,17 +715,28 @@ function App() {
       return
     }
 
+    if (!current?.current_player_id) {
+      notify('No live player')
+      return
+    }
+
     const playerBids = bids
-      .filter(b => b.player_id === current?.current_player_id)
+      .filter(
+        b =>
+          b.player_id === current.current_player_id
+      )
       .sort((a, b) => {
-        const d =
+        const diff =
           new Date(a.created_at).getTime() -
           new Date(b.created_at).getTime()
 
-        return d !== 0 ? d : Number(a.id) - Number(b.id)
+        return diff !== 0
+          ? diff
+          : Number(a.id) - Number(b.id)
       })
 
-    const lastBid = playerBids[playerBids.length - 1]
+    const lastBid =
+      playerBids[playerBids.length - 1]
 
     if (!lastBid) {
       notify('There are no bids to undo')
@@ -491,239 +746,102 @@ function App() {
     await deleteBid(lastBid.id)
   }
 
+  /*
+   * =========================================================
+   * UNDO SALE
+   * =========================================================
+   */
+
   async function undoSoldPlayer(resultId) {
     if (!session) {
       setLoginOpen(true)
       return
     }
 
-    const result = history.find(x => x.id === resultId)
+    const result = history.find(
+      x => x.id === resultId
+    )
 
-    if (!result || String(result.status).toUpperCase() !== 'SOLD') {
+    if (!result || result.status !== 'SOLD') {
       notify('Only SOLD players can be undone')
       return
     }
 
-    if (
-      !window.confirm(
-        `Undo sale of ${result.player?.name || 'this player'}?\n\n` +
-        `Team: ${result.team?.name || 'Unknown'}\n` +
-        `Refund: ${result.final_price} EP`
-      )
-    ) {
-      return
-    }
+    const confirmed = window.confirm(
+      `Undo the sale of ${
+        result.player?.name || 'this player'
+      }?\n\nTeam: ${
+        result.team?.name || 'Unknown'
+      }\nRefund: ${
+        result.final_price
+      } EP\n\nThe player will be removed from the squad and returned to AVAILABLE.`
+    )
+
+    if (!confirmed) return
 
     setUndoingSale(resultId)
 
-    const { error } = await supabase.rpc('undo_sold_player', {
-      p_result_id: resultId
-    })
+    const { error } = await supabase.rpc(
+      'undo_sold_player',
+      {
+        p_result_id: resultId
+      }
+    )
 
     setUndoingSale(null)
 
     if (error) {
       notify(error.message)
     } else {
-      if (previousPlayer?.id === resultId) {
-        setPreviousPlayer(null)
-      }
-
-      notify(`${result.final_price} EP refunded`)
+      notify(
+        `Sale undone • ${result.final_price} EP refunded`
+      )
       await loadPool()
     }
-  }
-
-  async function deletePlayer(playerId) {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
-    const player = players.find(p => p.id === playerId)
-
-    if (!player) return
-
-    if (player.status === 'sold') {
-      notify('Undo the sale before deleting a sold player')
-      return
-    }
-
-    if (
-      !window.confirm(
-        `Delete ${player.name}?\n\nThis will permanently remove the player.`
-      )
-    ) {
-      return
-    }
-
-    setDeletingPlayer(playerId)
-
-    const { error } = await supabase.rpc('delete_player', {
-      p_player_id: playerId
-    })
-
-    setDeletingPlayer(null)
-
-    if (error) {
-      notify(error.message)
-    } else {
-      notify('Player deleted')
-      await loadPool()
-    }
-  }
-
-  async function manualBid() {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
-    if (!current?.current_player_id) {
-      notify('No live player')
-      return
-    }
-
-    const team = teamMap[manualBidTeam]
-    const amount = Number(manualBidAmount)
-
-    if (!team) {
-      notify('Select a team')
-      return
-    }
-
-    if (!Number.isFinite(amount) || amount < 3) {
-      notify('Enter a valid bid of at least 3 EP')
-      return
-    }
-
-    const { error } = await supabase.rpc('manual_bid', {
-      p_pool_id: pool.id,
-      p_team_id: team.id,
-      p_amount: amount
-    })
-
-    if (error) {
-      notify(error.message)
-      return
-    }
-
-    setManualBidAmount('')
-    setManualBidOpen(false)
-    notify(`${team.name} bid ${amount} EP`)
-    await loadPool()
-  }
-
-  async function manualSale() {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
-    if (!current?.current_player_id) {
-      notify('No live player')
-      return
-    }
-
-    const team = teamMap[manualSaleTeam]
-    const amount = Number(manualSaleAmount)
-
-    if (!team) {
-      notify('Select a team')
-      return
-    }
-
-    if (!Number.isFinite(amount) || amount < 0) {
-      notify('Enter a valid sale price')
-      return
-    }
-
-    if (
-      !window.confirm(
-        `Sell ${current.current_player?.name || 'player'} to ${team.name} for ${amount} EP?`
-      )
-    ) {
-      return
-    }
-
-    const playerBeingSold = current?.current_player
-      ? {
-          id: current.current_player.id,
-          player_id: current.current_player.id,
-          player: current.current_player,
-          status: 'SOLD',
-          final_price: amount,
-          team,
-          team_id: team.id,
-          created_at: new Date().toISOString()
-        }
-      : null
-
-    const { error } = await supabase.rpc('manual_sell_current_player', {
-      p_pool_id: pool.id,
-      p_team_id: team.id,
-      p_amount: amount
-    })
-
-    if (error) {
-      notify(error.message)
-      return
-    }
-
-    if (playerBeingSold) {
-      setPreviousPlayer(playerBeingSold)
-    }
-
-    setManualSaleAmount('')
-    setManualSaleOpen(false)
-    notify(`Player sold to ${team.name} for ${amount} EP`)
-    await loadPool()
   }
 
   const selectedBalance = name =>
-    balances.find(x => x.team_id === teamMap[name]?.id)?.remaining_ep ?? 150
+    balances.find(
+      x =>
+        x.team_id ===
+        teamMap[name]?.id
+    )?.remaining_ep ?? 150
 
+  /*
+   * FIRST BID = 3
+   */
   const nextBid = b => {
-    if (b === 3 && !current?.leader_team_id) return 3
+    if (b === 3) return 4
     if (b < 10) return b + 1
     if (b < 20) return b + 2
     return b + 5
   }
 
-  const currentPlayerBids = current?.current_player_id
-    ? bids
-        .filter(b => b.player_id === current.current_player_id)
-        .sort((a, b) => {
-          const d =
-            new Date(a.created_at).getTime() -
-            new Date(b.created_at).getTime()
+  const currentPlayerBids =
+    current?.current_player_id
+      ? bids
+          .filter(
+            b =>
+              b.player_id ===
+              current.current_player_id
+          )
+          .sort((a, b) => {
+            const diff =
+              new Date(a.created_at).getTime() -
+              new Date(b.created_at).getTime()
 
-          return d !== 0 ? d : Number(a.id) - Number(b.id)
-        })
-    : []
-
-  /*
-   * =========================================================
-   * CURRENT HIGHEST BIDDER
-   *
-   * Uses the live auction state first.
-   * Falls back to the latest bid if necessary.
-   * =========================================================
-   */
-  const highestBidderName =
-    current?.leader_team?.name ||
-    currentPlayerBids[currentPlayerBids.length - 1]?.team?.name ||
-    null
-
-  const highestBidAmount =
-    current?.current_bid ??
-    currentPlayerBids[currentPlayerBids.length - 1]?.amount ??
-    null
+            return diff !== 0
+              ? diff
+              : Number(a.id) - Number(b.id)
+          })
+      : []
 
   function currentPoolTeamPlayers(teamName) {
+    if (!pool) return []
+
     return history.filter(
       x =>
-        String(x.status || '').toUpperCase() === 'SOLD' &&
+        x.status === 'SOLD' &&
         x.team?.name === teamName
     )
   }
@@ -731,25 +849,23 @@ function App() {
   function allPoolTeamPlayers(teamName) {
     return allHistory.filter(
       x =>
-        String(x.status || '').toUpperCase() === 'SOLD' &&
+        x.status === 'SOLD' &&
         x.team?.name === teamName
     )
   }
 
-  function openCurrentPoolTeam(teamName) {
-    setSelectedTeam(teamName)
-    setTeamViewMode('current')
-    setPage('teams')
-  }
-
-  function openAllPoolsTeam(teamName) {
-    setSelectedTeam(teamName)
-    setTeamViewMode('all')
-    setPage('teams')
-  }
+  /*
+   * =========================================================
+   * AUCTION PAGE
+   * =========================================================
+   */
 
   function auction() {
     const c = current
+
+    const availablePlayers = players.filter(
+      p => p.status === 'available'
+    )
 
     return (
       <>
@@ -773,12 +889,19 @@ function App() {
             value={pool?.id || ''}
             onChange={e => {
               setSelectedTeam(null)
-              setPreviousPlayer(null)
-              setPool(pools.find(x => x.id === e.target.value))
+
+              setPool(
+                pools.find(
+                  x => x.id === e.target.value
+                )
+              )
             }}
           >
             {pools.map(p => (
-              <option key={p.id} value={p.id}>
+              <option
+                key={p.id}
+                value={p.id}
+              >
                 {poolLabel(p)}
               </option>
             ))}
@@ -787,15 +910,15 @@ function App() {
 
         <div className="grid">
           <section>
-
-            {/* CURRENT PLAYER */}
             <div className="card player">
               <div className="roll">
-                ROLL NO. {c?.current_player?.roll_number || '—'}
+                ROLL NO.{' '}
+                {c?.current_player?.roll_number || '—'}
               </div>
 
               <div className="playername">
-                {c?.current_player?.name || 'No Player Added'}
+                {c?.current_player?.name ||
+                  'No Player Added'}
               </div>
 
               <div className="ep">
@@ -809,7 +932,9 @@ function App() {
 
               <div
                 className={`leader ${
-                  TEAM_COLORS[c?.leader_team?.name] || ''
+                  TEAM_COLORS[
+                    c?.leader_team?.name
+                  ] || ''
                 }`}
               >
                 {c?.leader_team?.name
@@ -818,203 +943,46 @@ function App() {
               </div>
             </div>
 
-            {/* =================================================
-                CURRENT HIGHEST BIDDER
-            ================================================= */}
-            {c?.current_player && (
-              <div
-                className="card"
-                style={{
-                  marginTop: '16px',
-                  border: highestBidderName
-                    ? '1px solid rgba(255,255,255,.16)'
-                    : '1px solid rgba(255,255,255,.08)',
-                  textAlign: 'center'
-                }}
-              >
-                <div
-                  className="eyebrow"
-                  style={{
-                    letterSpacing: '1.5px'
-                  }}
-                >
-                  CURRENT HIGHEST BIDDER
-                </div>
-
-                {highestBidderName ? (
-                  <>
-                    <div
-                      style={{
-                        marginTop: '8px',
-                        fontSize: '26px',
-                        fontWeight: '900'
-                      }}
-                    >
-                      🏆{' '}
-                      <span
-                        className={
-                          TEAM_COLORS[highestBidderName] || ''
-                        }
-                      >
-                        {highestBidderName}
-                      </span>
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: '5px',
-                        fontSize: '18px',
-                        fontWeight: '800'
-                      }}
-                    >
-                      {highestBidAmount} EP
-                    </div>
-
-                    <div
-                      className="sub"
-                      style={{
-                        marginTop: '6px'
-                      }}
-                    >
-                      Leading for{' '}
-                      {c.current_player.name}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div
-                      style={{
-                        marginTop: '10px',
-                        fontSize: '20px',
-                        fontWeight: '800'
-                      }}
-                    >
-                      No bids yet
-                    </div>
-
-                    <div
-                      className="sub"
-                      style={{
-                        marginTop: '4px'
-                      }}
-                    >
-                      Player is open at 3 EP
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* PREVIOUS PLAYER */}
-            {previousPlayer && (
-              <div
-                className="card"
-                style={{
-                  marginTop: '16px',
-                  border: '1px solid rgba(255,255,255,.12)'
-                }}
-              >
-                <div className="eyebrow">
-                  PREVIOUS PLAYER
-                </div>
-
-                <div
-                  style={{
-                    marginTop: '8px',
-                    fontSize: '22px',
-                    fontWeight: '800'
-                  }}
-                >
-                  {previousPlayer.player?.name ||
-                    'Unknown Player'}
-                </div>
-
-                <div
-                  className="sub"
-                  style={{
-                    marginTop: '4px'
-                  }}
-                >
-                  ROLL NO.{' '}
-                  {previousPlayer.player?.roll_number || '—'}
-                </div>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '12px',
-                    marginTop: '14px',
-                    flexWrap: 'wrap'
-                  }}
-                >
-                  <div
-                    style={{
-                      fontWeight: '800',
-                      fontSize: '18px'
-                    }}
-                  >
-                    {String(previousPlayer.status).toUpperCase() ===
-                    'SOLD'
-                      ? `🏆 ${
-                          previousPlayer.team?.name ||
-                          'Unknown Team'
-                        }`
-                      : '🔴 UNSOLD'}
-                  </div>
-
-                  <div
-                    style={{
-                      fontWeight: '800',
-                      fontSize: '18px'
-                    }}
-                  >
-                    {String(previousPlayer.status).toUpperCase() ===
-                    'SOLD'
-                      ? `${previousPlayer.final_price ?? 0} EP`
-                      : '—'}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    marginTop: '10px',
-                    fontSize: '13px',
-                    opacity: 0.65
-                  }}
-                >
-                  {String(previousPlayer.status).toUpperCase() ===
-                  'SOLD'
-                    ? 'Player sold successfully'
-                    : 'Player remained unsold'}
-                </div>
-              </div>
-            )}
-
             {mode === 'admin' && (
               <>
                 <div className="controls">
-                  {TEAM_NAMES.map(name => (
-                    <button
-                      className="teamBtn"
-                      key={name}
-                      disabled={
-                        !c?.current_player ||
-                        selectedBalance(name) <
-                          nextBid(c?.current_bid ?? 3)
-                      }
-                      onClick={() => bid(name)}
-                    >
-                      <span className={TEAM_COLORS[name]}>
-                        {name}
-                      </span>
+                  {TEAM_NAMES.map(name => {
+                    const isFirstBid =
+                      !c?.leader_team_id
 
-                      <small>
-                        Bid {nextBid(c?.current_bid ?? 3)} EP
-                      </small>
-                    </button>
-                  ))}
+                    const amount = isFirstBid
+                      ? 3
+                      : nextBid(
+                          c?.current_bid ?? 3
+                        )
+
+                    return (
+                      <button
+                        className="teamBtn"
+                        key={name}
+                        disabled={
+                          !c?.current_player ||
+                          selectedBalance(name) <
+                            amount
+                        }
+                        onClick={() =>
+                          bid(name)
+                        }
+                      >
+                        <span
+                          className={
+                            TEAM_COLORS[name]
+                          }
+                        >
+                          {name}
+                        </span>
+
+                        <small>
+                          Bid {amount} EP
+                        </small>
+                      </button>
+                    )
+                  })}
                 </div>
 
                 <div className="actions">
@@ -1032,7 +1000,9 @@ function App() {
                   <button
                     className="danger"
                     onClick={unsold}
-                    disabled={!c?.current_player}
+                    disabled={
+                      !c?.current_player
+                    }
                   >
                     UNSOLD
                   </button>
@@ -1040,78 +1010,76 @@ function App() {
                   <button
                     className="primary"
                     onClick={startPlayer}
-                    disabled={!!c?.current_player}
+                    disabled={
+                      !!c?.current_player
+                    }
                   >
                     NEXT PLAYER
                   </button>
                 </div>
 
-                {/* MANUAL CONTROLS */}
-                {c?.current_player && (
-                  <div
-                    className="card"
-                    style={{
-                      marginTop: '16px'
-                    }}
-                  >
-                    <div className="eyebrow">
-                      MANUAL AUCTION CONTROL
-                    </div>
+                <div
+                  className="card"
+                  style={{
+                    marginTop: '16px'
+                  }}
+                >
+                  <div className="eyebrow">
+                    AVAILABLE PLAYERS
+                  </div>
 
-                    <div className="sub">
-                      Use this if you need to manually correct a bid or sale.
-                    </div>
+                  <div className="teamPool">
+                    {availablePlayers.length}{' '}
+                    available in {poolLabel(pool)}
+                  </div>
 
+                  {availablePlayers.length === 0 ? (
+                    <div className="notice">
+                      No available players.
+                      Add players from the Players menu.
+                    </div>
+                  ) : (
                     <div
-                      className="actions"
                       style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
                         marginTop: '12px'
                       }}
                     >
-                      <button
-                        className="btn primary"
-                        onClick={() => {
-                          setManualBidTeam(
-                            c?.leader_team?.name ||
-                              'Falcons'
-                          )
+                      {availablePlayers.map(p => (
+                        <div
+                          key={p.id}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: '10px',
+                            padding: '10px 12px',
+                            border: '1px solid rgba(255,255,255,.1)',
+                            borderRadius: '10px'
+                          }}
+                        >
+                          <div>
+                            <strong>
+                              {p.roll_number} — {p.name}
+                            </strong>
+                          </div>
 
-                          setManualBidAmount(
-                            String(
-                              c?.current_bid ?? 3
-                            )
-                          )
-
-                          setManualBidOpen(true)
-                        }}
-                      >
-                        ➕ Manual Bid
-                      </button>
-
-                      <button
-                        className="btn success"
-                        onClick={() => {
-                          setManualSaleTeam(
-                            c?.leader_team?.name ||
-                              'Falcons'
-                          )
-
-                          setManualSaleAmount(
-                            String(
-                              c?.current_bid ?? 3
-                            )
-                          )
-
-                          setManualSaleOpen(true)
-                        }}
-                      >
-                        💰 Manual Sale
-                      </button>
+                          <button
+                            className="btn primary"
+                            onClick={() =>
+                              startExistingPlayer(p.id)
+                            }
+                          >
+                            Start Auction
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
 
-                {/* BID HISTORY */}
                 {c?.current_player && (
                   <div
                     className="card"
@@ -1146,13 +1114,11 @@ function App() {
                               key={b.id}
                               style={{
                                 display: 'flex',
-                                justifyContent:
-                                  'space-between',
+                                justifyContent: 'space-between',
                                 alignItems: 'center',
                                 gap: '10px',
                                 padding: '10px 12px',
-                                border:
-                                  '1px solid rgba(255,255,255,.1)',
+                                border: '1px solid rgba(255,255,255,.1)',
                                 borderRadius: '10px'
                               }}
                             >
@@ -1230,9 +1196,11 @@ function App() {
                     key={name}
                     name={name}
                     balance={selectedBalance(name)}
-                    onClick={() =>
-                      openCurrentPoolTeam(name)
-                    }
+                    onClick={() => {
+                      setSelectedTeam(name)
+                      setTeamViewMode('current')
+                      setPage('teams')
+                    }}
                   />
                 ))}
               </div>
@@ -1242,6 +1210,360 @@ function App() {
       </>
     )
   }
+
+  /*
+   * =========================================================
+   * PLAYERS PAGE
+   * =========================================================
+   */
+
+  function playersPage() {
+    const filteredPlayers = players.filter(
+      p => p.pool_id === pool?.id
+    )
+
+    return (
+      <>
+        <div className="sectionhead">
+          <div>
+            <div className="eyebrow">
+              PLAYER MANAGEMENT
+            </div>
+
+            <div className="title">
+              PLAYERS
+            </div>
+
+            <div className="sub">
+              Only players belonging to the selected pool are shown.
+            </div>
+          </div>
+
+          {mode === 'admin' && (
+            <div className="actions">
+              <button
+                className="btn primary"
+                onClick={() =>
+                  setManualAddOpen(true)
+                }
+              >
+                ➕ Add Player Manually
+              </button>
+
+              <button
+                className="btn"
+                onClick={() =>
+                  setImportOpen(true)
+                }
+              >
+                📥 Import Players
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="eyebrow">
+            SELECT POOL
+          </div>
+
+          <select
+            className="select"
+            style={{
+              marginTop: '10px',
+              width: '100%',
+              maxWidth: '350px'
+            }}
+            value={pool?.id || ''}
+            onChange={e => {
+              const selected = pools.find(
+                p => p.id === e.target.value
+              )
+
+              if (selected) {
+                setPool(selected)
+              }
+            }}
+          >
+            {pools.map(p => (
+              <option
+                key={p.id}
+                value={p.id}
+              >
+                {poolLabel(p)}
+              </option>
+            ))}
+          </select>
+
+          <div
+            className="notice"
+            style={{
+              marginTop: '16px'
+            }}
+          >
+            Showing <b>{filteredPlayers.length}</b>{' '}
+            players from <b>{poolLabel(pool)}</b>.
+          </div>
+        </div>
+
+        <div
+          className="card"
+          style={{
+            marginTop: '16px'
+          }}
+        >
+          <div className="eyebrow">
+            {poolLabel(pool)} PLAYERS
+          </div>
+
+          {filteredPlayers.length === 0 ? (
+            <div className="notice">
+              No players have been added to this pool yet.
+            </div>
+          ) : (
+            <div
+              style={{
+                overflowX: 'auto',
+                marginTop: '12px'
+              }}
+            >
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Roll</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {filteredPlayers.map(p => (
+                    <tr key={p.id}>
+                      <td>{p.roll_number}</td>
+
+                      <td>{p.name}</td>
+
+                      <td>
+                        <span
+                          style={{
+                            textTransform: 'uppercase'
+                          }}
+                        >
+                          {p.status}
+                        </span>
+                      </td>
+
+                      <td>
+                        {mode === 'admin' &&
+                        p.status !== 'sold' &&
+                        p.status !== 'live' ? (
+                          <button
+                            className="danger"
+                            disabled={
+                              deletingPlayer === p.id
+                            }
+                            onClick={() =>
+                              deletePlayer(p)
+                            }
+                          >
+                            {deletingPlayer === p.id
+                              ? 'Deleting…'
+                              : '🗑 Delete'}
+                          </button>
+                        ) : p.status === 'sold' ? (
+                          <span className="sub">
+                            Undo sale first
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {manualAddOpen && (
+          <div className="modal">
+            <div className="modalCard">
+              <div className="title">
+                Add Player Manually
+              </div>
+
+              <div className="sub">
+                The player will be added as AVAILABLE.
+              </div>
+
+              <label className="sub">
+                Batch
+              </label>
+
+              <select
+                className="field"
+                value={newBatch}
+                onChange={e =>
+                  setNewBatch(Number(e.target.value))
+                }
+              >
+                {BATCHES.map(b => (
+                  <option
+                    key={b}
+                    value={b}
+                  >
+                    {b}
+                  </option>
+                ))}
+              </select>
+
+              <label className="sub">
+                Gender
+              </label>
+
+              <select
+                className="field"
+                value={newGender}
+                onChange={e =>
+                  setNewGender(e.target.value)
+                }
+              >
+                {GENDERS.map(g => (
+                  <option
+                    key={g}
+                    value={g}
+                  >
+                    {g}
+                  </option>
+                ))}
+              </select>
+
+              <input
+                className="field"
+                placeholder="Roll number"
+                value={newRoll}
+                onChange={e =>
+                  setNewRoll(e.target.value)
+                }
+              />
+
+              <input
+                className="field"
+                placeholder="Player name"
+                value={newName}
+                onChange={e =>
+                  setNewName(e.target.value)
+                }
+              />
+
+              <div className="notice">
+                Pool: <b>{newBatch} • {newGender}</b>
+              </div>
+
+              <div className="actions">
+                <button
+                  className="btn"
+                  onClick={() =>
+                    setManualAddOpen(false)
+                  }
+                >
+                  Cancel
+                </button>
+
+                <button
+                  className="btn primary"
+                  onClick={addPlayerManually}
+                >
+                  Add Player
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {importOpen && (
+          <div className="modal">
+            <div className="modalCard">
+              <div className="title">
+                📥 Import Players
+              </div>
+
+              <div className="sub">
+                Upload a CSV exported from Google Sheets.
+              </div>
+
+              <div
+                className="notice"
+                style={{
+                  marginTop: '14px',
+                  lineHeight: 1.6
+                }}
+              >
+                <b>Required columns:</b>
+                <br />
+                batch, gender, roll_number, name
+                <br /><br />
+
+                <b>Example:</b>
+                <br />
+                2024, Male, 01, Rahul Kumar
+                <br />
+                2024, Male, 02, Arjun Reddy
+                <br />
+                2024, Female, 01, Priya Sharma
+              </div>
+
+              <input
+                className="field"
+                type="file"
+                accept=".csv,text/csv"
+                style={{
+                  marginTop: '16px'
+                }}
+                disabled={importing}
+                onChange={e => {
+                  const file =
+                    e.target.files?.[0]
+
+                  if (file) {
+                    importCSV(file)
+                  }
+
+                  e.target.value = ''
+                }}
+              />
+
+              {importing && (
+                <div className="notice">
+                  Importing players…
+                </div>
+              )}
+
+              <div className="actions">
+                <button
+                  className="btn"
+                  disabled={importing}
+                  onClick={() =>
+                    setImportOpen(false)
+                  }
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    )
+  }
+
+  /*
+   * =========================================================
+   * TEAMS PAGE
+   * =========================================================
+   */
 
   function teamsPage() {
     if (selectedTeam) {
@@ -1277,7 +1599,9 @@ function App() {
 
             <button
               className="btn"
-              onClick={() => setSelectedTeam(null)}
+              onClick={() =>
+                setSelectedTeam(null)
+              }
             >
               ← All Teams
             </button>
@@ -1339,7 +1663,11 @@ function App() {
 
             {displayedPlayers.length === 0 ? (
               <div className="notice">
-                No players purchased by {selectedTeam}.
+                No players purchased by{' '}
+                {selectedTeam}{' '}
+                {teamViewMode === 'current'
+                  ? `in ${poolLabel(pool)}`
+                  : 'across any pool'}.
               </div>
             ) : (
               <table className="table">
@@ -1351,7 +1679,6 @@ function App() {
 
                     <th>Player</th>
                     <th>Price</th>
-                    <th>Status</th>
                   </tr>
                 </thead>
 
@@ -1361,7 +1688,7 @@ function App() {
                       {teamViewMode === 'all' && (
                         <td>
                           {x.pool
-                            ? `${x.pool.batch_year} • ${x.pool.gender}`
+                            ? poolLabel(x.pool)
                             : '—'}
                         </td>
                       )}
@@ -1373,10 +1700,6 @@ function App() {
 
                       <td>
                         {x.final_price} EP
-                      </td>
-
-                      <td>
-                        {x.status}
                       </td>
                     </tr>
                   ))}
@@ -1405,9 +1728,10 @@ function App() {
               <button
                 key={name}
                 className="stat"
-                onClick={() =>
-                  openAllPoolsTeam(name)
-                }
+                onClick={() => {
+                  setSelectedTeam(name)
+                  setTeamViewMode('all')
+                }}
                 style={{
                   cursor: 'pointer',
                   textAlign: 'left'
@@ -1423,7 +1747,9 @@ function App() {
 
                 <b>
                   {count} player
-                  {count === 1 ? '' : 's'}
+                  {count === 1
+                    ? ''
+                    : 's'}
                 </b>
 
                 <small>
@@ -1437,86 +1763,11 @@ function App() {
     )
   }
 
-  function playersPage() {
-    return (
-      <>
-        <Header
-          eyebrow="ADMIN"
-          title="PLAYERS"
-          sub="Players in the currently selected pool."
-        />
-
-        <div className="card">
-          <div className="notice">
-            Selected pool:{' '}
-            <b>{poolLabel(pool)}</b>
-          </div>
-
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Roll</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {players.map(p => (
-                <tr key={p.id}>
-                  <td>{p.roll_number}</td>
-
-                  <td>{p.name}</td>
-
-                  <td>{p.status}</td>
-
-                  <td>
-                    <div
-                      style={{
-                        display: 'flex',
-                        gap: '6px',
-                        flexWrap: 'wrap'
-                      }}
-                    >
-                      {p.status === 'unsold' && (
-                        <button
-                          className="btn primary"
-                          onClick={() =>
-                            relist(p.id)
-                          }
-                        >
-                          ↻ Relist
-                        </button>
-                      )}
-
-                      {p.status !== 'sold' && (
-                        <button
-                          className="danger"
-                          disabled={
-                            deletingPlayer ===
-                            p.id
-                          }
-                          onClick={() =>
-                            deletePlayer(p.id)
-                          }
-                        >
-                          {deletingPlayer ===
-                          p.id
-                            ? 'Deleting…'
-                            : '🗑 Delete'}
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </>
-    )
-  }
+  /*
+   * =========================================================
+   * HISTORY
+   * =========================================================
+   */
 
   function historyPage() {
     return (
@@ -1524,7 +1775,7 @@ function App() {
         <Header
           eyebrow="COMPLETE LIST"
           title="AUCTION HISTORY"
-          sub="Sold and unsold records from the selected pool."
+          sub="Sold and unsold records from Supabase."
         />
 
         <div className="card">
@@ -1563,42 +1814,28 @@ function App() {
 
                   {mode === 'admin' && (
                     <td>
-                      {String(
-                        x.status
-                      ).toUpperCase() ===
-                        'SOLD' && (
+                      {x.status === 'SOLD' ? (
                         <button
                           className="danger"
                           disabled={
-                            undoingSale ===
-                            x.id
+                            undoingSale === x.id
                           }
                           onClick={() =>
-                            undoSoldPlayer(
-                              x.id
-                            )
+                            undoSoldPlayer(x.id)
                           }
                         >
-                          {undoingSale ===
-                          x.id
+                          {undoingSale === x.id
                             ? 'Undoing…'
                             : '↩ Undo Sale'}
                         </button>
-                      )}
-
-                      {String(
-                        x.status
-                      ).toUpperCase() ===
-                        'UNSOLD' && (
+                      ) : (
                         <button
-                          className="btn primary"
+                          className="btn"
                           onClick={() =>
-                            relist(
-                              x.player_id
-                            )
+                            relist(x.player_id)
                           }
                         >
-                          ↻ Relist
+                          ↩ Relist
                         </button>
                       )}
                     </td>
@@ -1612,6 +1849,12 @@ function App() {
     )
   }
 
+  /*
+   * =========================================================
+   * POOLS
+   * =========================================================
+   */
+
   function poolsPage() {
     return (
       <>
@@ -1623,25 +1866,42 @@ function App() {
 
         <div className="stats poolsGrid">
           {pools.map(p => (
-            <div
+            <button
               className="stat"
               key={p.id}
+              style={{
+                cursor: 'pointer',
+                textAlign: 'left'
+              }}
+              onClick={() => {
+                setPool(p)
+                setSelectedTeam(null)
+                setPage('players')
+              }}
             >
               <span>
                 {poolLabel(p)}
               </span>
 
-              <b>5 × 150 EP</b>
+              <b>
+                5 × 150 EP
+              </b>
 
               <small>
-                Independent team budgets
+                Click to view players →
               </small>
-            </div>
+            </button>
           ))}
         </div>
       </>
     )
   }
+
+  /*
+   * =========================================================
+   * MAIN LAYOUT
+   * =========================================================
+   */
 
   if (loading) {
     return (
@@ -1762,124 +2022,12 @@ function App() {
         </main>
       </div>
 
-      {manualBidOpen && (
-        <div className="modal">
-          <div className="modalCard">
-            <div className="title">
-              Manual Bid
-            </div>
-
-            <div className="sub">
-              Enter the team and exact bid amount.
-            </div>
-
-            <select
-              className="field"
-              value={manualBidTeam}
-              onChange={e =>
-                setManualBidTeam(e.target.value)
-              }
-            >
-              {TEAM_NAMES.map(name => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-
-            <input
-              className="field"
-              type="number"
-              min="3"
-              placeholder="Bid amount"
-              value={manualBidAmount}
-              onChange={e =>
-                setManualBidAmount(e.target.value)
-              }
-            />
-
-            <div className="actions">
-              <button
-                className="btn"
-                onClick={() =>
-                  setManualBidOpen(false)
-                }
-              >
-                Cancel
-              </button>
-
-              <button
-                className="btn primary"
-                onClick={manualBid}
-              >
-                Add Bid
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {manualSaleOpen && (
-        <div className="modal">
-          <div className="modalCard">
-            <div className="title">
-              Manual Sale
-            </div>
-
-            <div className="sub">
-              Choose which team gets the player and the exact sale price.
-            </div>
-
-            <select
-              className="field"
-              value={manualSaleTeam}
-              onChange={e =>
-                setManualSaleTeam(e.target.value)
-              }
-            >
-              {TEAM_NAMES.map(name => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-
-            <input
-              className="field"
-              type="number"
-              min="0"
-              placeholder="Sale price"
-              value={manualSaleAmount}
-              onChange={e =>
-                setManualSaleAmount(e.target.value)
-              }
-            />
-
-            <div className="actions">
-              <button
-                className="btn"
-                onClick={() =>
-                  setManualSaleOpen(false)
-                }
-              >
-                Cancel
-              </button>
-
-              <button
-                className="btn success"
-                onClick={manualSale}
-              >
-                Confirm Sale
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {loginOpen && (
         <Login
           onLogin={login}
-          onClose={() => setLoginOpen(false)}
+          onClose={() =>
+            setLoginOpen(false)
+          }
         />
       )}
 
@@ -1891,6 +2039,12 @@ function App() {
     </div>
   )
 }
+
+/*
+ * ===========================================================
+ * COMPONENTS
+ * ===========================================================
+ */
 
 function TeamCard({
   name,
@@ -1981,7 +2135,9 @@ function Nav({
 }) {
   return (
     <button
-      className={active ? 'active' : ''}
+      className={
+        active ? 'active' : ''
+      }
       onClick={onClick}
     >
       {children}
@@ -1999,8 +2155,11 @@ function Login({
   onLogin,
   onClose
 }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [email, setEmail] =
+    useState('')
+
+  const [password, setPassword] =
+    useState('')
 
   return (
     <div className="modal">
@@ -2043,7 +2202,10 @@ function Login({
           <button
             className="btn primary"
             onClick={() =>
-              onLogin(email, password)
+              onLogin(
+                email,
+                password
+              )
             }
           >
             Login
@@ -2065,9 +2227,9 @@ function SetupScreen() {
         <p className="sub">
           Add VITE_SUPABASE_URL and
           VITE_SUPABASE_ANON_KEY to your
-          Vercel environment variables, run
-          the supplied SQL in Supabase, then
-          redeploy.
+          Vercel environment variables,
+          run the supplied SQL in Supabase,
+          then redeploy.
         </p>
       </div>
     </div>
