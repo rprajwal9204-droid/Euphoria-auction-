@@ -61,10 +61,10 @@ function App() {
 
   /* =========================================================
      MANUAL SOLD
+     ONLY CURRENT LIVE PLAYER
   ========================================================= */
 
   const [manualSoldOpen, setManualSoldOpen] = useState(false)
-  const [manualSoldPlayer, setManualSoldPlayer] = useState('')
   const [manualSoldTeam, setManualSoldTeam] = useState('')
   const [manualSoldPoints, setManualSoldPoints] = useState('')
   const [manualSelling, setManualSelling] = useState(false)
@@ -225,7 +225,7 @@ function App() {
     const [state, bal, ps, hist, bidData] = await Promise.all([
       supabase
         .from('auction_states')
-        .select('*, current_player:players(*)')
+        .select('*, current_player:players(*), leader_team:teams(*)')
         .eq('pool_id', pool.id)
         .single(),
 
@@ -383,7 +383,7 @@ function App() {
   }
 
   /* =========================================================
-     CSV PARSER
+     CSV
   ========================================================= */
 
   function normalizeCsvHeader(value) {
@@ -449,20 +449,6 @@ function App() {
 
     return rows
   }
-
-  /* =========================================================
-     CSV IMPORT
-     
-     Your current Supabase RPC expects:
-     
-     batch
-     gender
-     roll_number
-     name
-     
-     If batch/gender are missing from CSV, the CURRENT
-     SELECTED POOL is automatically used.
-  ========================================================= */
 
   async function importPlayersFromCsv() {
     if (!session) {
@@ -564,10 +550,6 @@ function App() {
 
         const normalizedRoll = roll.toLowerCase()
 
-        /*
-         * Only skip existing players when they belong
-         * to the currently selected pool.
-         */
         if (
           batch === String(pool.batch_year) &&
           gender.toLowerCase() ===
@@ -604,14 +586,6 @@ function App() {
         return
       }
 
-      /*
-       * IMPORTANT:
-       * This calls your existing one-argument RPC:
-       *
-       * import_players(p_players jsonb)
-       *
-       * It automatically finds the pool from batch + gender.
-       */
       const { data, error } = await supabase.rpc(
         'import_players',
         {
@@ -628,14 +602,13 @@ function App() {
       setImportFile(null)
       setImportOpen(false)
 
-      const added =
-        Number(data?.added) || 0
-
-      const skipped =
-        Number(data?.skipped) || 0
+      const added = Number(data?.added) || 0
+      const skipped = Number(data?.skipped) || 0
 
       notify(
-        `Import complete • Added ${added} • Skipped ${skipped + duplicateCount + invalidCount}`
+        `Import complete • Added ${added} • Skipped ${
+          skipped + duplicateCount + invalidCount
+        }`
       )
 
       await loadPool()
@@ -750,7 +723,9 @@ function App() {
     if (error) {
       notify(error.message)
     } else {
-      notify('Player SOLD')
+      notify(
+        `${current?.current_player?.name || 'Player'} SOLD`
+      )
       await loadPool()
     }
   }
@@ -773,7 +748,7 @@ function App() {
       notify(error.message)
     } else {
       notify(
-        'Player UNSOLD • You can enter the same roll number again'
+        `${current?.current_player?.name || 'Player'} UNSOLD • You can enter the same roll number again`
       )
       await loadPool()
     }
@@ -782,21 +757,14 @@ function App() {
   /* =========================================================
      MANUAL SOLD
      
-     Uses your existing RPCs:
+     IMPORTANT:
+     ONLY THE CURRENT LIVE PLAYER CAN BE SOLD.
      
-     1. start_player_by_roll
-     2. manual_bid
-     3. sell_current_player
-     
-     This gives the admin:
-     - Player
-     - Team
-     - Exact EP/points
-     
-     without needing another SQL function.
+     No player dropdown.
+     No selecting an arbitrary player.
   ========================================================= */
 
-  async function manualSellPlayer() {
+  async function manualSellCurrentPlayer() {
     if (!session) {
       setLoginOpen(true)
       return
@@ -807,15 +775,8 @@ function App() {
       return
     }
 
-    if (current?.current_player_id) {
-      notify(
-        'Finish the current live player before using Manual SOLD'
-      )
-      return
-    }
-
-    if (!manualSoldPlayer) {
-      notify('Select a player')
+    if (!current?.current_player_id || !current?.current_player) {
+      notify('Manual SOLD is only available for the current bidding player')
       return
     }
 
@@ -849,26 +810,23 @@ function App() {
       return
     }
 
-    const player =
-      players.find(
-        p => String(p.id) === String(manualSoldPlayer)
-      )
+    const player = current.current_player
 
-    if (!player) {
-      notify('Player not found')
-      return
-    }
-
-    if (player.status === 'sold') {
+    if (
+      player.status === 'sold'
+    ) {
       notify('This player is already SOLD')
       return
     }
 
+    const playerName = player.name
+    const playerRoll = player.roll_number
+
     if (
       !window.confirm(
         `Confirm MANUAL SOLD?\n\n` +
-        `Player: ${player.name}\n` +
-        `Roll: ${player.roll_number}\n` +
+        `Player: ${playerName}\n` +
+        `Roll: ${playerRoll}\n` +
         `Team: ${manualSoldTeam}\n` +
         `Price: ${amount} EP`
       )
@@ -880,71 +838,192 @@ function App() {
 
     try {
       /*
-       * STEP 1:
-       * Put player into live auction state.
+       * The current player MUST still be the same player
+       * when the operation begins.
        */
-      const startResult = await supabase.rpc(
-        'start_player_by_roll',
-        {
-          p_pool_id: pool.id,
-          p_roll_number: String(player.roll_number)
-        }
-      )
+      const { data: latestState, error: stateError } =
+        await supabase
+          .from('auction_states')
+          .select('*')
+          .eq('pool_id', pool.id)
+          .single()
 
-      if (startResult.error) {
-        notify(startResult.error.message)
+      if (stateError) {
+        notify(stateError.message)
+        setManualSelling(false)
+        return
+      }
+
+      if (
+        !latestState?.current_player_id ||
+        String(latestState.current_player_id) !==
+          String(player.id)
+      ) {
+        notify(
+          'The current player changed. Refreshing auction.'
+        )
+        await loadPool()
         setManualSelling(false)
         return
       }
 
       /*
-       * STEP 2:
-       * Create exact manual bid.
+       * Create the manual bid at the exact amount.
        */
-      const bidResult = await supabase.rpc(
-        'manual_bid',
-        {
-          p_pool_id: pool.id,
-          p_team_id: team.id,
-          p_amount: amount
-        }
-      )
+      const { error: bidError } =
+        await supabase
+          .from('bids')
+          .insert({
+            pool_id: pool.id,
+            player_id: player.id,
+            team_id: team.id,
+            amount
+          })
 
-      if (bidResult.error) {
-        /*
-         * Try refreshing so UI reflects actual state.
-         */
-        await loadPool()
-        notify(bidResult.error.message)
+      if (bidError) {
+        notify(bidError.message)
         setManualSelling(false)
         return
       }
 
       /*
-       * STEP 3:
-       * Sell current player.
+       * Update live auction state.
        */
-      const saleResult = await supabase.rpc(
-        'sell_current_player',
-        {
-          p_pool_id: pool.id
-        }
-      )
+      const { error: stateUpdateError } =
+        await supabase
+          .from('auction_states')
+          .update({
+            current_bid: amount,
+            leader_team_id: team.id,
+            updated_at: new Date().toISOString()
+          })
+          .eq('pool_id', pool.id)
+          .eq('current_player_id', player.id)
 
-      if (saleResult.error) {
+      if (stateUpdateError) {
+        notify(stateUpdateError.message)
         await loadPool()
-        notify(saleResult.error.message)
         setManualSelling(false)
         return
       }
 
-      setManualSoldPlayer('')
+      /*
+       * Deduct the exact amount from team balance.
+       */
+      const { data: balanceRows, error: balanceError } =
+        await supabase
+          .from('team_pool_balances')
+          .select('remaining_ep')
+          .eq('pool_id', pool.id)
+          .eq('team_id', team.id)
+          .gte('remaining_ep', amount)
+
+      if (balanceError) {
+        notify(balanceError.message)
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
+      if (!balanceRows || balanceRows.length === 0) {
+        notify('Team has insufficient EP')
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
+      const currentBalance =
+        Number(balanceRows[0].remaining_ep)
+
+      const { error: balanceUpdateError } =
+        await supabase
+          .from('team_pool_balances')
+          .update({
+            remaining_ep: currentBalance - amount
+          })
+          .eq('pool_id', pool.id)
+          .eq('team_id', team.id)
+          .eq('remaining_ep', currentBalance)
+
+      if (balanceUpdateError) {
+        notify(balanceUpdateError.message)
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
+      /*
+       * Mark the CURRENT PLAYER sold.
+       */
+      const { error: playerError } =
+        await supabase
+          .from('players')
+          .update({
+            status: 'sold',
+            sold_team_id: team.id,
+            sold_price: amount
+          })
+          .eq('id', player.id)
+          .eq('pool_id', pool.id)
+          .neq('status', 'sold')
+
+      if (playerError) {
+        notify(playerError.message)
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
+      /*
+       * Add auction result.
+       */
+      const { error: resultError } =
+        await supabase
+          .from('auction_results')
+          .insert({
+            pool_id: pool.id,
+            player_id: player.id,
+            team_id: team.id,
+            final_price: amount,
+            status: 'SOLD'
+          })
+
+      if (resultError) {
+        notify(resultError.message)
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
+      /*
+       * Reset auction.
+       */
+      const { error: resetError } =
+        await supabase
+          .from('auction_states')
+          .update({
+            current_player_id: null,
+            current_bid: 3,
+            leader_team_id: null,
+            status: 'idle',
+            updated_at: new Date().toISOString()
+          })
+          .eq('pool_id', pool.id)
+          .eq('current_player_id', player.id)
+
+      if (resetError) {
+        notify(resetError.message)
+        await loadPool()
+        setManualSelling(false)
+        return
+      }
+
       setManualSoldTeam('')
       setManualSoldPoints('')
       setManualSoldOpen(false)
 
       notify(
-        `${player.name} SOLD to ${manualSoldTeam} for ${amount} EP`
+        `${playerName} SOLD to ${manualSoldTeam} for ${amount} EP`
       )
 
       await loadPool()
@@ -953,6 +1032,7 @@ function App() {
         error?.message ||
           'Manual sale failed'
       )
+      await loadPool()
     }
 
     setManualSelling(false)
@@ -1214,6 +1294,10 @@ function App() {
   ========================================================= */
 
   function PlayerManagement() {
+    const hasCurrentPlayer =
+      !!current?.current_player_id &&
+      !!current?.current_player
+
     return (
       <div
         className="card"
@@ -1255,10 +1339,21 @@ function App() {
 
           <button
             className="btn"
+            disabled={!hasCurrentPlayer}
             onClick={() => {
+              if (!hasCurrentPlayer) {
+                notify(
+                  'Manual SOLD is only available for the current bidding player'
+                )
+                return
+              }
+
               setManualSoldOpen(!manualSoldOpen)
               setManualAddOpen(false)
               setImportOpen(false)
+
+              setManualSoldTeam('')
+              setManualSoldPoints('')
             }}
           >
             💰 Manual SOLD
@@ -1410,142 +1505,162 @@ function App() {
           </div>
         )}
 
-        {/* MANUAL SOLD */}
+        {/* =====================================================
+            MANUAL SOLD — CURRENT PLAYER ONLY
+        ===================================================== */}
+
         {manualSoldOpen && (
           <div style={{ marginTop: '14px' }}>
             <div className="eyebrow">
-              MANUAL SOLD
+              MANUAL SOLD • CURRENT PLAYER
             </div>
 
-            <div className="notice">
-              Use this when you want to directly
-              mark a player as SOLD without going
-              through normal bidding.
-            </div>
-
-            <select
-              className="select"
-              style={{
-                width: '100%',
-                marginTop: '10px'
-              }}
-              value={manualSoldPlayer}
-              onChange={e =>
-                setManualSoldPlayer(e.target.value)
-              }
-            >
-              <option value="">
-                Select Player
-              </option>
-
-              {players
-                .filter(
-                  p => p.status !== 'sold'
-                )
-                .sort((a, b) =>
-                  String(a.roll_number).localeCompare(
-                    String(b.roll_number),
-                    undefined,
-                    { numeric: true }
-                  )
-                )
-                .map(p => (
-                  <option
-                    key={p.id}
-                    value={p.id}
-                  >
-                    {p.roll_number} — {p.name}
-                    {p.status === 'available'
-                      ? ''
-                      : ` (${p.status})`}
-                  </option>
-                ))}
-            </select>
-
-            <select
-              className="select"
-              style={{
-                width: '100%',
-                marginTop: '10px'
-              }}
-              value={manualSoldTeam}
-              onChange={e =>
-                setManualSoldTeam(e.target.value)
-              }
-            >
-              <option value="">
-                Select Team
-              </option>
-
-              {TEAM_NAMES.map(name => (
-                <option
-                  key={name}
-                  value={name}
-                >
-                  {name} — {selectedBalance(name)} EP
-                </option>
-              ))}
-            </select>
-
-            <input
-              className="field"
-              style={{
-                width: '100%',
-                marginTop: '10px'
-              }}
-              type="number"
-              min="3"
-              step="1"
-              placeholder="Sale points / EP"
-              value={manualSoldPoints}
-              onChange={e =>
-                setManualSoldPoints(e.target.value)
-              }
-            />
-
-            <div
-              className="actions"
-              style={{ marginTop: '12px' }}
-            >
-              <button
-                className="btn success"
-                disabled={
-                  manualSelling ||
-                  !manualSoldPlayer ||
-                  !manualSoldTeam ||
-                  !manualSoldPoints
-                }
-                onClick={manualSellPlayer}
-              >
-                {manualSelling
-                  ? 'Selling…'
-                  : '✓ CONFIRM SOLD'}
-              </button>
-
-              <button
-                className="btn"
-                onClick={() => {
-                  setManualSoldOpen(false)
-                  setManualSoldPlayer('')
-                  setManualSoldTeam('')
-                  setManualSoldPoints('')
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-
-            {manualSoldTeam && (
-              <div
-                className="notice"
-                style={{ marginTop: '10px' }}
-              >
-                {manualSoldTeam} currently has{' '}
-                <b>
-                  {selectedBalance(manualSoldTeam)} EP
-                </b>
-                .
+            {!hasCurrentPlayer ? (
+              <div className="notice">
+                No player is currently in the auction.
+                <br />
+                <b>Manual SOLD is available only for the current bidding player.</b>
               </div>
+            ) : (
+              <>
+                <div
+                  className="card"
+                  style={{
+                    marginTop: '10px',
+                    border:
+                      '1px solid rgba(255,255,255,.15)'
+                  }}
+                >
+                  <div className="eyebrow">
+                    CURRENT PLAYER
+                  </div>
+
+                  <div
+                    className="playername"
+                    style={{
+                      fontSize: '28px',
+                      marginTop: '5px'
+                    }}
+                  >
+                    {current.current_player.name}
+                  </div>
+
+                  <div
+                    className="teamPool"
+                    style={{ marginTop: '6px' }}
+                  >
+                    Roll No.{' '}
+                    {current.current_player.roll_number}
+                  </div>
+
+                  <div
+                    className="sub"
+                    style={{ marginTop: '8px' }}
+                  >
+                    Current bid:{' '}
+                    <b>
+                      {current.current_bid ?? 3} EP
+                    </b>
+                  </div>
+                </div>
+
+                <div
+                  className="notice"
+                  style={{ marginTop: '10px' }}
+                >
+                  This player will be sold directly.
+                  <br />
+                  You cannot select another player here.
+                </div>
+
+                <select
+                  className="select"
+                  style={{
+                    width: '100%',
+                    marginTop: '10px'
+                  }}
+                  value={manualSoldTeam}
+                  onChange={e =>
+                    setManualSoldTeam(e.target.value)
+                  }
+                >
+                  <option value="">
+                    Select Winning Team
+                  </option>
+
+                  {TEAM_NAMES.map(name => (
+                    <option
+                      key={name}
+                      value={name}
+                    >
+                      {name} — {selectedBalance(name)} EP
+                    </option>
+                  ))}
+                </select>
+
+                <input
+                  className="field"
+                  style={{
+                    width: '100%',
+                    marginTop: '10px'
+                  }}
+                  type="number"
+                  min="3"
+                  step="1"
+                  placeholder="SOLD price / EP"
+                  value={manualSoldPoints}
+                  onChange={e =>
+                    setManualSoldPoints(e.target.value)
+                  }
+                />
+
+                <div
+                  className="actions"
+                  style={{ marginTop: '12px' }}
+                >
+                  <button
+                    className="btn success"
+                    disabled={
+                      manualSelling ||
+                      !hasCurrentPlayer ||
+                      !manualSoldTeam ||
+                      !manualSoldPoints
+                    }
+                    onClick={
+                      manualSellCurrentPlayer
+                    }
+                  >
+                    {manualSelling
+                      ? 'Selling…'
+                      : `✓ SELL ${current.current_player.name}`}
+                  </button>
+
+                  <button
+                    className="btn"
+                    disabled={manualSelling}
+                    onClick={() => {
+                      setManualSoldOpen(false)
+                      setManualSoldTeam('')
+                      setManualSoldPoints('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {manualSoldTeam && (
+                  <div
+                    className="notice"
+                    style={{ marginTop: '10px' }}
+                  >
+                    {manualSoldTeam} currently has{' '}
+                    <b>
+                      {selectedBalance(manualSoldTeam)} EP
+                    </b>
+                    .
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
