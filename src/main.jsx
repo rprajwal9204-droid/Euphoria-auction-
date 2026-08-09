@@ -2251,7 +2251,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          {PlayerManagement()}
+          <PlayerManagement />
         )}
 
         <div
