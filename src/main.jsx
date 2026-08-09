@@ -55,6 +55,31 @@ function App() {
   const [manualSoldPoints, setManualSoldPoints] = useState('')
   const [manualSelling, setManualSelling] = useState(false)
 
+  /*
+   * =========================================================
+   * AUCTION RESULT ANNOUNCEMENT
+   *
+   * This is purely frontend state.
+   * It does NOT modify any database logic.
+   * =========================================================
+   */
+  const [auctionAnnouncement, setAuctionAnnouncement] =
+    useState(null)
+
+  /*
+   * Automatically remove the SOLD / UNSOLD announcement
+   * after exactly 5 seconds.
+   */
+  useEffect(() => {
+    if (!auctionAnnouncement) return
+
+    const timer = setTimeout(() => {
+      setAuctionAnnouncement(null)
+    }, 5000)
+
+    return () => clearTimeout(timer)
+  }, [auctionAnnouncement])
+
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
     [teams]
@@ -617,9 +642,7 @@ function App() {
           batch === String(pool.batch_year) &&
           gender.toLowerCase() ===
             String(pool.gender).toLowerCase() &&
-          existingRolls.has(
-            roll.toLowerCase()
-          )
+          existingRolls.has(roll.toLowerCase())
         ) {
           duplicateCount++
           continue
@@ -703,6 +726,11 @@ function App() {
       return
     }
 
+    if (auctionAnnouncement) {
+      notify('Please wait for the auction result announcement')
+      return
+    }
+
     const roll = rollNumber.trim()
 
     if (!roll) {
@@ -750,7 +778,8 @@ function App() {
 
     if (
       !team ||
-      !current?.current_player_id
+      !current?.current_player_id ||
+      auctionAnnouncement
     ) {
       return
     }
@@ -790,6 +819,14 @@ function App() {
       return
     }
 
+    /*
+     * Capture these BEFORE the RPC because the current player
+     * may disappear from auction_states after the sale.
+     */
+    const soldPlayer = current.current_player
+    const soldTeam = current.leader_team
+    const soldPrice = current.current_bid
+
     const { error } =
       await supabase.rpc(
         'sell_current_player',
@@ -800,10 +837,27 @@ function App() {
 
     if (error) {
       notify(error.message)
-    } else {
-      notify('Player SOLD')
-      await loadPool()
+      return
     }
+
+    /*
+     * Existing database sale is already complete.
+     * Now show the 5-second announcement.
+     */
+    setAuctionAnnouncement({
+      type: 'SOLD',
+      playerName: soldPlayer?.name || 'Player',
+      rollNumber: soldPlayer?.roll_number || '—',
+      teamName: soldTeam?.name || 'Unknown Team',
+      price: soldPrice
+    })
+
+    setRollOpen(false)
+    setManualSoldOpen(false)
+
+    notify('Player SOLD')
+
+    await loadPool()
   }
 
   async function unsold() {
@@ -811,6 +865,12 @@ function App() {
       notify('No live player')
       return
     }
+
+    /*
+     * Capture the player before mark_unsold clears the
+     * current auction state.
+     */
+    const unsoldPlayer = current.current_player
 
     const { error } =
       await supabase.rpc(
@@ -822,12 +882,23 @@ function App() {
 
     if (error) {
       notify(error.message)
-    } else {
-      notify(
-        'Player UNSOLD • You can enter the same roll number again'
-      )
-      await loadPool()
+      return
     }
+
+    setAuctionAnnouncement({
+      type: 'UNSOLD',
+      playerName: unsoldPlayer?.name || 'Player',
+      rollNumber: unsoldPlayer?.roll_number || '—'
+    })
+
+    setRollOpen(false)
+    setManualSoldOpen(false)
+
+    notify(
+      'Player UNSOLD • You can enter the same roll number again'
+    )
+
+    await loadPool()
   }
 
   /* =========================================================
@@ -910,11 +981,6 @@ function App() {
     setManualSelling(true)
 
     try {
-      /*
-       * Remove the current player's existing bids.
-       * This prevents the old winning bid from interfering
-       * with the manually selected team/price.
-       */
       const existingBids =
         bids.filter(
           b =>
@@ -939,8 +1005,7 @@ function App() {
       }
 
       /*
-       * Create exactly one bid representing
-       * the manually selected sale.
+       * Keep the existing Manual SOLD behaviour intact.
        */
       const bidResult =
         await supabase.rpc(
@@ -958,10 +1023,6 @@ function App() {
         return
       }
 
-      /*
-       * Sell the current player using the normal
-       * auction sale RPC.
-       */
       const saleResult =
         await supabase.rpc(
           'sell_current_player',
@@ -976,16 +1037,25 @@ function App() {
         return
       }
 
-      const soldTeamName = manualSoldTeam
-      const soldAmount = amount
-      const soldPlayerName = player.name
+      /*
+       * Show the same 5-second SOLD announcement
+       * for Manual SOLD.
+       */
+      setAuctionAnnouncement({
+        type: 'SOLD',
+        playerName: player.name,
+        rollNumber: player.roll_number,
+        teamName: manualSoldTeam,
+        price: amount
+      })
 
       setManualSoldTeam('')
       setManualSoldPoints('')
       setManualSoldOpen(false)
+      setRollOpen(false)
 
       notify(
-        `${soldPlayerName} SOLD to ${soldTeamName} for ${soldAmount} EP`
+        `${player.name} SOLD to ${manualSoldTeam} for ${amount} EP`
       )
 
       await loadPool()
@@ -1252,26 +1322,9 @@ function App() {
 
   /* =========================================================
      PLAYER MANAGEMENT
-     
-     IMPORTANT FIX:
-     
-     This is deliberately a NORMAL FUNCTION and NOT a React
-     component.
-     
-     DO NOT change this to:
-     
-       function PlayerManagement() { ... }
-     
-     and then render:
-     
-       <PlayerManagement />
-     
-     Doing that inside App causes the component to be
-     remounted whenever App state changes, which makes mobile
-     keyboard/input focus disappear after the first character.
   ========================================================= */
 
-  function playerManagement() {
+  function PlayerManagement() {
     const hasLivePlayer =
       !!current?.current_player_id
 
@@ -1316,7 +1369,10 @@ function App() {
 
           <button
             className="btn"
-            disabled={!hasLivePlayer}
+            disabled={
+              !hasLivePlayer ||
+              !!auctionAnnouncement
+            }
             onClick={() => {
               if (!hasLivePlayer) {
                 notify(
@@ -1325,14 +1381,11 @@ function App() {
                 return
               }
 
-              const opening =
-                !manualSoldOpen
-
-              setManualSoldOpen(opening)
+              setManualSoldOpen(!manualSoldOpen)
               setManualAddOpen(false)
               setImportOpen(false)
 
-              if (opening) {
+              if (!manualSoldOpen) {
                 setManualSoldTeam('')
                 setManualSoldPoints('')
               }
@@ -1524,9 +1577,7 @@ function App() {
                   }}
                   value={manualSoldTeam}
                   onChange={e =>
-                    setManualSoldTeam(
-                      e.target.value
-                    )
+                    setManualSoldTeam(e.target.value)
                   }
                 >
                   <option value="">
@@ -1552,7 +1603,6 @@ function App() {
                   type="number"
                   min="3"
                   step="1"
-                  inputMode="numeric"
                   placeholder="Sale points / EP"
                   value={manualSoldPoints}
                   onChange={e =>
@@ -1571,7 +1621,8 @@ function App() {
                     disabled={
                       manualSelling ||
                       !manualSoldTeam ||
-                      !manualSoldPoints
+                      !manualSoldPoints ||
+                      !!auctionAnnouncement
                     }
                     onClick={
                       manualSellCurrentPlayer
@@ -1584,7 +1635,6 @@ function App() {
 
                   <button
                     className="btn"
-                    disabled={manualSelling}
                     onClick={() => {
                       setManualSoldOpen(false)
                       setManualSoldTeam('')
@@ -1638,6 +1688,7 @@ function App() {
             value={pool?.id || ''}
             onChange={e => {
               setSelectedTeam(null)
+              setAuctionAnnouncement(null)
 
               setPool(
                 pools.find(
@@ -1702,6 +1753,7 @@ function App() {
                       className="teamBtn"
                       key={name}
                       disabled={
+                        !!auctionAnnouncement ||
                         !c?.current_player ||
                         selectedBalance(name) <
                           displayedBidAmount
@@ -1728,6 +1780,7 @@ function App() {
                     className="success"
                     onClick={sold}
                     disabled={
+                      !!auctionAnnouncement ||
                       !c?.current_player ||
                       !c?.leader_team_id
                     }
@@ -1738,7 +1791,10 @@ function App() {
                   <button
                     className="danger"
                     onClick={unsold}
-                    disabled={!c?.current_player}
+                    disabled={
+                      !!auctionAnnouncement ||
+                      !c?.current_player
+                    }
                   >
                     UNSOLD
                   </button>
@@ -1748,19 +1804,16 @@ function App() {
                     onClick={() =>
                       setRollOpen(true)
                     }
-                    disabled={!!c?.current_player}
+                    disabled={
+                      !!auctionAnnouncement ||
+                      !!c?.current_player
+                    }
                   >
                     NEXT PLAYER
                   </button>
                 </div>
 
-                {/*
-                 * IMPORTANT:
-                 * Normal function call, NOT <PlayerManagement />.
-                 *
-                 * This preserves input focus while typing.
-                 */}
-                {playerManagement()}
+                <PlayerManagement />
 
                 {rollOpen && (
                   <div
@@ -1800,7 +1853,6 @@ function App() {
                         }
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
-                            e.preventDefault()
                             startPlayerByRoll()
                           }
                         }}
@@ -1810,6 +1862,7 @@ function App() {
                         className="btn primary"
                         disabled={
                           startingPlayer ||
+                          !!auctionAnnouncement ||
                           !rollNumber.trim()
                         }
                         onClick={
@@ -1896,7 +1949,8 @@ function App() {
                               <button
                                 className="danger"
                                 disabled={
-                                  deletingBid === b.id
+                                  deletingBid === b.id ||
+                                  !!auctionAnnouncement
                                 }
                                 onClick={() =>
                                   deleteBid(b.id)
@@ -1920,7 +1974,8 @@ function App() {
                             disabled={
                               currentPlayerBids.length ===
                                 0 ||
-                              deletingBid !== null
+                              deletingBid !== null ||
+                              !!auctionAnnouncement
                             }
                           >
                             ↩ Undo Last Bid
@@ -1959,6 +2014,17 @@ function App() {
             </div>
           </section>
         </div>
+
+        {/*
+         * =====================================================
+         * 5-SECOND AUCTION RESULT SCREEN
+         * =====================================================
+         */}
+        {auctionAnnouncement && (
+          <AuctionAnnouncement
+            announcement={auctionAnnouncement}
+          />
+        )}
       </>
     )
   }
@@ -2047,7 +2113,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          playerManagement()
+          <PlayerManagement />
         )}
 
         <div
@@ -2368,6 +2434,140 @@ function App() {
 }
 
 /* =========================================================
+   AUCTION ANNOUNCEMENT
+========================================================= */
+
+function AuctionAnnouncement({
+  announcement
+}) {
+  const sold =
+    announcement.type === 'SOLD'
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 100,
+        background: 'rgba(0,0,0,.86)',
+        display: 'grid',
+        placeItems: 'center',
+        padding: '20px',
+        backdropFilter: 'blur(12px)'
+      }}
+    >
+      <div
+        style={{
+          width: 'min(700px, 100%)',
+          textAlign: 'center',
+          background:
+            'linear-gradient(145deg,#171a23,#0b0d12)',
+          border: sold
+            ? '2px solid #1d6b42'
+            : '2px solid #6b2020',
+          borderRadius: '28px',
+          padding: '42px 24px',
+          boxShadow:
+            '0 30px 100px rgba(0,0,0,.6)'
+        }}
+      >
+        <div
+          style={{
+            fontSize: 'clamp(42px,9vw,82px)',
+            fontWeight: 950,
+            letterSpacing: '.04em',
+            lineHeight: 1,
+            color: sold
+              ? '#4ade80'
+              : '#f87171'
+          }}
+        >
+          {sold ? '✓ SOLD' : 'UNSOLD'}
+        </div>
+
+        <div
+          style={{
+            marginTop: '24px',
+            fontSize: 'clamp(28px,5vw,52px)',
+            fontWeight: 950,
+            lineHeight: 1.1
+          }}
+        >
+          {announcement.playerName}
+        </div>
+
+        <div
+          style={{
+            marginTop: '10px',
+            color: '#8d94a5',
+            fontSize: '16px'
+          }}
+        >
+          Roll No. {announcement.rollNumber}
+        </div>
+
+        {sold ? (
+          <>
+            <div
+              style={{
+                marginTop: '28px',
+                color: '#8d94a5',
+                fontSize: '13px',
+                textTransform: 'uppercase',
+                letterSpacing: '.18em'
+              }}
+            >
+              SOLD TO
+            </div>
+
+            <div
+              style={{
+                marginTop: '6px',
+                fontSize: 'clamp(30px,6vw,58px)',
+                fontWeight: 950
+              }}
+            >
+              {announcement.teamName}
+            </div>
+
+            <div
+              style={{
+                marginTop: '16px',
+                fontSize: '30px',
+                fontWeight: 900
+              }}
+            >
+              {announcement.price} EP
+            </div>
+          </>
+        ) : (
+          <div
+            style={{
+              marginTop: '28px',
+              fontSize: '26px',
+              fontWeight: 900,
+              color: '#f87171'
+            }}
+          >
+            Player was not sold
+          </div>
+        )}
+
+        <div
+          style={{
+            marginTop: '30px',
+            color: '#8d94a5',
+            fontSize: '13px'
+          }}
+        >
+          Next player can be entered after the announcement.
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* =========================================================
    TEAM DETAILS
 ========================================================= */
 
@@ -2654,7 +2854,6 @@ function Login({
         <input
           className="field"
           placeholder="Admin email"
-          autoComplete="email"
           value={email}
           onChange={e =>
             setEmail(e.target.value)
@@ -2665,7 +2864,6 @@ function Login({
           className="field"
           type="password"
           placeholder="Password"
-          autoComplete="current-password"
           value={password}
           onChange={e =>
             setPassword(e.target.value)
