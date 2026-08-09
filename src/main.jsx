@@ -48,14 +48,26 @@ function App() {
   const [undoingSale, setUndoingSale] = useState(null)
   const [deletingPlayer, setDeletingPlayer] = useState(null)
 
+  /* Manual player */
   const [manualAddOpen, setManualAddOpen] = useState(false)
   const [manualRoll, setManualRoll] = useState('')
   const [manualName, setManualName] = useState('')
   const [addingManual, setAddingManual] = useState(false)
 
+  /* CSV */
   const [importOpen, setImportOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importFile, setImportFile] = useState(null)
+
+  /* =========================================================
+     MANUAL SOLD
+  ========================================================= */
+
+  const [manualSoldOpen, setManualSoldOpen] = useState(false)
+  const [manualSoldPlayer, setManualSoldPlayer] = useState('')
+  const [manualSoldTeam, setManualSoldTeam] = useState('')
+  const [manualSoldPoints, setManualSoldPoints] = useState('')
+  const [manualSelling, setManualSelling] = useState(false)
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
@@ -323,7 +335,6 @@ function App() {
       return
     }
 
-    /* Duplicate protection */
     const duplicate = players.some(
       p =>
         String(p.roll_number).trim().toLowerCase() ===
@@ -345,6 +356,7 @@ function App() {
         pool_id: pool.id,
         roll_number: roll,
         name,
+        base_price: 3,
         status: 'available'
       })
 
@@ -371,17 +383,7 @@ function App() {
   }
 
   /* =========================================================
-     CSV IMPORT
-     
-     Expected CSV:
-     
-     roll_number,name
-     101,John
-     102,David
-     103,Arjun
-     
-     Also accepts:
-     roll,name
+     CSV PARSER
   ========================================================= */
 
   function normalizeCsvHeader(value) {
@@ -423,9 +425,7 @@ function App() {
         (char === '\n' || char === '\r') &&
         !insideQuotes
       ) {
-        if (char === '\r' && next === '\n') {
-          i++
-        }
+        if (char === '\r' && next === '\n') i++
 
         row.push(cell)
         cell = ''
@@ -449,6 +449,20 @@ function App() {
 
     return rows
   }
+
+  /* =========================================================
+     CSV IMPORT
+     
+     Your current Supabase RPC expects:
+     
+     batch
+     gender
+     roll_number
+     name
+     
+     If batch/gender are missing from CSV, the CURRENT
+     SELECTED POOL is automatically used.
+  ========================================================= */
 
   async function importPlayersFromCsv() {
     if (!session) {
@@ -495,28 +509,37 @@ function App() {
           h === 'player'
       )
 
+      const batchIndex = headers.findIndex(
+        h =>
+          h === 'batch' ||
+          h === 'batch_year' ||
+          h === 'year'
+      )
+
+      const genderIndex = headers.findIndex(
+        h =>
+          h === 'gender' ||
+          h === 'sex'
+      )
+
       if (rollIndex === -1 || nameIndex === -1) {
         notify(
-          'CSV needs columns named roll_number and name'
+          'CSV must contain roll_number and name columns'
         )
         setImporting(false)
         return
       }
 
-      /* Existing rolls in this pool */
       const existingRolls = new Set(
         players.map(p =>
-          String(p.roll_number)
-            .trim()
-            .toLowerCase()
+          String(p.roll_number).trim().toLowerCase()
         )
       )
 
-      const seenInCsv = new Set()
-
-      const validPlayers = []
-      const skippedDuplicates = []
-      const skippedInvalid = []
+      const seen = new Set()
+      const payload = []
+      let duplicateCount = 0
+      let invalidCount = 0
 
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i]
@@ -524,74 +547,80 @@ function App() {
         const roll = String(row[rollIndex] || '').trim()
         const name = String(row[nameIndex] || '').trim()
 
-        if (!roll || !name) {
-          skippedInvalid.push(i + 1)
+        const batch =
+          batchIndex >= 0
+            ? String(row[batchIndex] || '').trim()
+            : String(pool.batch_year)
+
+        const gender =
+          genderIndex >= 0
+            ? String(row[genderIndex] || '').trim()
+            : String(pool.gender)
+
+        if (!roll || !name || !batch || !gender) {
+          invalidCount++
           continue
         }
 
         const normalizedRoll = roll.toLowerCase()
 
-        /* Duplicate already in database */
-        if (existingRolls.has(normalizedRoll)) {
-          skippedDuplicates.push({
-            roll,
-            reason: 'Already exists'
-          })
+        /*
+         * Only skip existing players when they belong
+         * to the currently selected pool.
+         */
+        if (
+          batch === String(pool.batch_year) &&
+          gender.toLowerCase() ===
+            String(pool.gender).toLowerCase() &&
+          existingRolls.has(normalizedRoll)
+        ) {
+          duplicateCount++
           continue
         }
 
-        /* Duplicate within same CSV */
-        if (seenInCsv.has(normalizedRoll)) {
-          skippedDuplicates.push({
-            roll,
-            reason: 'Duplicate in CSV'
-          })
+        const key =
+          `${batch}|${gender.toLowerCase()}|${normalizedRoll}`
+
+        if (seen.has(key)) {
+          duplicateCount++
           continue
         }
 
-        seenInCsv.add(normalizedRoll)
+        seen.add(key)
 
-        validPlayers.push({
-          pool_id: pool.id,
+        payload.push({
+          batch,
+          gender,
           roll_number: roll,
-          name,
-          status: 'available'
+          name
         })
       }
 
-      if (validPlayers.length === 0) {
-        setImporting(false)
-
+      if (!payload.length) {
         notify(
-          `Nothing imported • ${skippedDuplicates.length} duplicate(s), ${skippedInvalid.length} invalid row(s)`
+          `Nothing to import • ${duplicateCount} duplicate(s), ${invalidCount} invalid row(s)`
         )
-
+        setImporting(false)
         return
       }
 
-      const { error } = await supabase
-        .from('players')
-        .insert(validPlayers)
+      /*
+       * IMPORTANT:
+       * This calls your existing one-argument RPC:
+       *
+       * import_players(p_players jsonb)
+       *
+       * It automatically finds the pool from batch + gender.
+       */
+      const { data, error } = await supabase.rpc(
+        'import_players',
+        {
+          p_players: payload
+        }
+      )
 
       if (error) {
-        /*
-         * If the database has a unique constraint,
-         * this also protects against duplicates inserted
-         * by another admin at exactly the same time.
-         */
-        if (
-          error.code === '23505' ||
-          String(error.message || '')
-            .toLowerCase()
-            .includes('duplicate')
-        ) {
-          notify(
-            'Import stopped because one or more roll numbers already exist.'
-          )
-        } else {
-          notify(error.message)
-        }
-
+        notify(error.message)
         setImporting(false)
         return
       }
@@ -599,22 +628,21 @@ function App() {
       setImportFile(null)
       setImportOpen(false)
 
-      const message =
-        `Imported ${validPlayers.length} player(s)` +
-        (skippedDuplicates.length
-          ? ` • Skipped ${skippedDuplicates.length} duplicate(s)`
-          : '') +
-        (skippedInvalid.length
-          ? ` • Skipped ${skippedInvalid.length} invalid row(s)`
-          : '')
+      const added =
+        Number(data?.added) || 0
 
-      notify(message)
+      const skipped =
+        Number(data?.skipped) || 0
+
+      notify(
+        `Import complete • Added ${added} • Skipped ${skipped + duplicateCount + invalidCount}`
+      )
 
       await loadPool()
     } catch (error) {
       notify(
         error?.message ||
-          'Could not read the CSV file'
+          'Could not read CSV file'
       )
     }
 
@@ -681,8 +709,7 @@ function App() {
 
     const playerBids = bids.filter(
       b =>
-        b.player_id ===
-        current.current_player_id
+        b.player_id === current.current_player_id
     )
 
     const amount =
@@ -750,6 +777,185 @@ function App() {
       )
       await loadPool()
     }
+  }
+
+  /* =========================================================
+     MANUAL SOLD
+     
+     Uses your existing RPCs:
+     
+     1. start_player_by_roll
+     2. manual_bid
+     3. sell_current_player
+     
+     This gives the admin:
+     - Player
+     - Team
+     - Exact EP/points
+     
+     without needing another SQL function.
+  ========================================================= */
+
+  async function manualSellPlayer() {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (!pool) {
+      notify('Select a pool first')
+      return
+    }
+
+    if (current?.current_player_id) {
+      notify(
+        'Finish the current live player before using Manual SOLD'
+      )
+      return
+    }
+
+    if (!manualSoldPlayer) {
+      notify('Select a player')
+      return
+    }
+
+    if (!manualSoldTeam) {
+      notify('Select a team')
+      return
+    }
+
+    const amount = Number(manualSoldPoints)
+
+    if (!Number.isFinite(amount) || amount < 3) {
+      notify('Enter a valid sale price of at least 3 EP')
+      return
+    }
+
+    const team = teamMap[manualSoldTeam]
+
+    if (!team) {
+      notify('Invalid team')
+      return
+    }
+
+    const balance = Number(
+      selectedBalance(manualSoldTeam)
+    )
+
+    if (balance < amount) {
+      notify(
+        `${manualSoldTeam} only has ${balance} EP remaining`
+      )
+      return
+    }
+
+    const player =
+      players.find(
+        p => String(p.id) === String(manualSoldPlayer)
+      )
+
+    if (!player) {
+      notify('Player not found')
+      return
+    }
+
+    if (player.status === 'sold') {
+      notify('This player is already SOLD')
+      return
+    }
+
+    if (
+      !window.confirm(
+        `Confirm MANUAL SOLD?\n\n` +
+        `Player: ${player.name}\n` +
+        `Roll: ${player.roll_number}\n` +
+        `Team: ${manualSoldTeam}\n` +
+        `Price: ${amount} EP`
+      )
+    ) {
+      return
+    }
+
+    setManualSelling(true)
+
+    try {
+      /*
+       * STEP 1:
+       * Put player into live auction state.
+       */
+      const startResult = await supabase.rpc(
+        'start_player_by_roll',
+        {
+          p_pool_id: pool.id,
+          p_roll_number: String(player.roll_number)
+        }
+      )
+
+      if (startResult.error) {
+        notify(startResult.error.message)
+        setManualSelling(false)
+        return
+      }
+
+      /*
+       * STEP 2:
+       * Create exact manual bid.
+       */
+      const bidResult = await supabase.rpc(
+        'manual_bid',
+        {
+          p_pool_id: pool.id,
+          p_team_id: team.id,
+          p_amount: amount
+        }
+      )
+
+      if (bidResult.error) {
+        /*
+         * Try refreshing so UI reflects actual state.
+         */
+        await loadPool()
+        notify(bidResult.error.message)
+        setManualSelling(false)
+        return
+      }
+
+      /*
+       * STEP 3:
+       * Sell current player.
+       */
+      const saleResult = await supabase.rpc(
+        'sell_current_player',
+        {
+          p_pool_id: pool.id
+        }
+      )
+
+      if (saleResult.error) {
+        await loadPool()
+        notify(saleResult.error.message)
+        setManualSelling(false)
+        return
+      }
+
+      setManualSoldPlayer('')
+      setManualSoldTeam('')
+      setManualSoldPoints('')
+      setManualSoldOpen(false)
+
+      notify(
+        `${player.name} SOLD to ${manualSoldTeam} for ${amount} EP`
+      )
+
+      await loadPool()
+    } catch (error) {
+      notify(
+        error?.message ||
+          'Manual sale failed'
+      )
+    }
+
+    setManualSelling(false)
   }
 
   /* =========================================================
@@ -941,17 +1147,10 @@ function App() {
   const nextBid = b => {
     const value = Number(b)
 
-    if (!Number.isFinite(value)) {
-      return 3
-    }
+    if (!Number.isFinite(value)) return 3
 
-    if (value < 10) {
-      return value + 1
-    }
-
-    if (value < 20) {
-      return value + 2
-    }
+    if (value < 10) return value + 1
+    if (value < 20) return value + 2
 
     return value + 5
   }
@@ -966,21 +1165,14 @@ function App() {
           )
           .sort((a, b) => {
             const difference =
-              new Date(
-                a.created_at
-              ).getTime() -
-              new Date(
-                b.created_at
-              ).getTime()
+              new Date(a.created_at).getTime() -
+              new Date(b.created_at).getTime()
 
             if (difference !== 0) {
               return difference
             }
 
-            return (
-              Number(a.id) -
-              Number(b.id)
-            )
+            return Number(a.id) - Number(b.id)
           })
       : []
 
@@ -1015,6 +1207,350 @@ function App() {
   function openAllPoolsTeam(teamName) {
     setSelectedTeam(teamName)
     setPage('teams')
+  }
+
+  /* =========================================================
+     PLAYER MANAGEMENT PANEL
+  ========================================================= */
+
+  function PlayerManagement() {
+    return (
+      <div
+        className="card"
+        style={{ marginTop: '16px' }}
+      >
+        <div className="eyebrow">
+          PLAYER MANAGEMENT
+        </div>
+
+        <div className="teamPool">
+          {poolLabel(pool)}
+        </div>
+
+        <div
+          className="actions"
+          style={{ marginTop: '12px' }}
+        >
+          <button
+            className="btn primary"
+            onClick={() => {
+              setManualAddOpen(!manualAddOpen)
+              setImportOpen(false)
+              setManualSoldOpen(false)
+            }}
+          >
+            ➕ Add Player Manually
+          </button>
+
+          <button
+            className="btn"
+            onClick={() => {
+              setImportOpen(!importOpen)
+              setManualAddOpen(false)
+              setManualSoldOpen(false)
+            }}
+          >
+            📥 Import Players
+          </button>
+
+          <button
+            className="btn"
+            onClick={() => {
+              setManualSoldOpen(!manualSoldOpen)
+              setManualAddOpen(false)
+              setImportOpen(false)
+            }}
+          >
+            💰 Manual SOLD
+          </button>
+        </div>
+
+        {/* MANUAL ADD */}
+        {manualAddOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              MANUAL ENTRY
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: '10px',
+                marginTop: '10px',
+                flexWrap: 'wrap'
+              }}
+            >
+              <input
+                className="field"
+                style={{
+                  flex: '1',
+                  minWidth: '150px'
+                }}
+                inputMode="numeric"
+                placeholder="Roll number"
+                value={manualRoll}
+                onChange={e =>
+                  setManualRoll(e.target.value)
+                }
+              />
+
+              <input
+                className="field"
+                style={{
+                  flex: '2',
+                  minWidth: '200px'
+                }}
+                placeholder="Player name"
+                value={manualName}
+                onChange={e =>
+                  setManualName(e.target.value)
+                }
+              />
+
+              <button
+                className="btn primary"
+                disabled={
+                  addingManual ||
+                  !manualRoll.trim() ||
+                  !manualName.trim()
+                }
+                onClick={addManualPlayer}
+              >
+                {addingManual
+                  ? 'Adding…'
+                  : 'Add Player'}
+              </button>
+            </div>
+
+            <div
+              className="notice"
+              style={{ marginTop: '10px' }}
+            >
+              Duplicate roll numbers in this pool
+              are automatically blocked.
+            </div>
+          </div>
+        )}
+
+        {/* CSV */}
+        {importOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              CSV IMPORT
+            </div>
+
+            <div className="notice">
+              <b>CSV format:</b>
+              <br />
+              roll_number,name
+              <br />
+              101,John
+              <br />
+              102,David
+              <br />
+              <br />
+
+              You can also include:
+              <br />
+              <b>batch,gender,roll_number,name</b>
+              <br />
+              <br />
+
+              If batch/gender are not included,
+              the currently selected pool is used.
+            </div>
+
+            <input
+              className="field"
+              style={{ marginTop: '10px' }}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={e =>
+                setImportFile(
+                  e.target.files?.[0] || null
+                )
+              }
+            />
+
+            <div
+              className="actions"
+              style={{ marginTop: '10px' }}
+            >
+              <button
+                className="btn primary"
+                disabled={
+                  importing || !importFile
+                }
+                onClick={importPlayersFromCsv}
+              >
+                {importing
+                  ? 'Importing…'
+                  : 'Import CSV'}
+              </button>
+
+              <button
+                className="btn"
+                onClick={() => {
+                  setImportOpen(false)
+                  setImportFile(null)
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div
+              className="notice"
+              style={{ marginTop: '10px' }}
+            >
+              ⚠️ Duplicate players are skipped.
+              Duplicate roll numbers inside the
+              same CSV are also skipped.
+            </div>
+          </div>
+        )}
+
+        {/* MANUAL SOLD */}
+        {manualSoldOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              MANUAL SOLD
+            </div>
+
+            <div className="notice">
+              Use this when you want to directly
+              mark a player as SOLD without going
+              through normal bidding.
+            </div>
+
+            <select
+              className="select"
+              style={{
+                width: '100%',
+                marginTop: '10px'
+              }}
+              value={manualSoldPlayer}
+              onChange={e =>
+                setManualSoldPlayer(e.target.value)
+              }
+            >
+              <option value="">
+                Select Player
+              </option>
+
+              {players
+                .filter(
+                  p => p.status !== 'sold'
+                )
+                .sort((a, b) =>
+                  String(a.roll_number).localeCompare(
+                    String(b.roll_number),
+                    undefined,
+                    { numeric: true }
+                  )
+                )
+                .map(p => (
+                  <option
+                    key={p.id}
+                    value={p.id}
+                  >
+                    {p.roll_number} — {p.name}
+                    {p.status === 'available'
+                      ? ''
+                      : ` (${p.status})`}
+                  </option>
+                ))}
+            </select>
+
+            <select
+              className="select"
+              style={{
+                width: '100%',
+                marginTop: '10px'
+              }}
+              value={manualSoldTeam}
+              onChange={e =>
+                setManualSoldTeam(e.target.value)
+              }
+            >
+              <option value="">
+                Select Team
+              </option>
+
+              {TEAM_NAMES.map(name => (
+                <option
+                  key={name}
+                  value={name}
+                >
+                  {name} — {selectedBalance(name)} EP
+                </option>
+              ))}
+            </select>
+
+            <input
+              className="field"
+              style={{
+                width: '100%',
+                marginTop: '10px'
+              }}
+              type="number"
+              min="3"
+              step="1"
+              placeholder="Sale points / EP"
+              value={manualSoldPoints}
+              onChange={e =>
+                setManualSoldPoints(e.target.value)
+              }
+            />
+
+            <div
+              className="actions"
+              style={{ marginTop: '12px' }}
+            >
+              <button
+                className="btn success"
+                disabled={
+                  manualSelling ||
+                  !manualSoldPlayer ||
+                  !manualSoldTeam ||
+                  !manualSoldPoints
+                }
+                onClick={manualSellPlayer}
+              >
+                {manualSelling
+                  ? 'Selling…'
+                  : '✓ CONFIRM SOLD'}
+              </button>
+
+              <button
+                className="btn"
+                onClick={() => {
+                  setManualSoldOpen(false)
+                  setManualSoldPlayer('')
+                  setManualSoldTeam('')
+                  setManualSoldPoints('')
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+
+            {manualSoldTeam && (
+              <div
+                className="notice"
+                style={{ marginTop: '10px' }}
+              >
+                {manualSoldTeam} currently has{' '}
+                <b>
+                  {selectedBalance(manualSoldTeam)} EP
+                </b>
+                .
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
   }
 
   /* =========================================================
@@ -1129,9 +1665,7 @@ function App() {
                       </span>
 
                       <small>
-                        Bid{' '}
-                        {displayedBidAmount}{' '}
-                        EP
+                        Bid {displayedBidAmount} EP
                       </small>
                     </button>
                   ))}
@@ -1152,9 +1686,7 @@ function App() {
                   <button
                     className="danger"
                     onClick={unsold}
-                    disabled={
-                      !c?.current_player
-                    }
+                    disabled={!c?.current_player}
                   >
                     UNSOLD
                   </button>
@@ -1172,230 +1704,12 @@ function App() {
                   </button>
                 </div>
 
-                {/* =================================================
-                    PLAYER ENTRY TOOLS
-                ================================================= */}
-
-                <div
-                  className="card"
-                  style={{
-                    marginTop: '16px'
-                  }}
-                >
-                  <div className="eyebrow">
-                    PLAYER MANAGEMENT
-                  </div>
-
-                  <div className="teamPool">
-                    Add players to{' '}
-                    {poolLabel(pool)}
-                  </div>
-
-                  <div
-                    className="actions"
-                    style={{
-                      marginTop: '12px'
-                    }}
-                  >
-                    <button
-                      className="btn primary"
-                      onClick={() => {
-                        setManualAddOpen(
-                          !manualAddOpen
-                        )
-                        setImportOpen(false)
-                      }}
-                    >
-                      ➕ Add Player Manually
-                    </button>
-
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        setImportOpen(
-                          !importOpen
-                        )
-                        setManualAddOpen(false)
-                      }}
-                    >
-                      📥 Import Players
-                    </button>
-                  </div>
-
-                  {manualAddOpen && (
-                    <div
-                      style={{
-                        marginTop: '14px'
-                      }}
-                    >
-                      <div className="eyebrow">
-                        MANUAL ENTRY
-                      </div>
-
-                      <div
-                        style={{
-                          display: 'flex',
-                          gap: '10px',
-                          marginTop: '10px',
-                          flexWrap: 'wrap'
-                        }}
-                      >
-                        <input
-                          className="field"
-                          style={{
-                            flex: '1',
-                            minWidth: '150px'
-                          }}
-                          inputMode="numeric"
-                          placeholder="Roll number"
-                          value={manualRoll}
-                          onChange={e =>
-                            setManualRoll(
-                              e.target.value
-                            )
-                          }
-                        />
-
-                        <input
-                          className="field"
-                          style={{
-                            flex: '2',
-                            minWidth: '200px'
-                          }}
-                          placeholder="Player name"
-                          value={manualName}
-                          onChange={e =>
-                            setManualName(
-                              e.target.value
-                            )
-                          }
-                        />
-
-                        <button
-                          className="btn primary"
-                          disabled={
-                            addingManual ||
-                            !manualRoll.trim() ||
-                            !manualName.trim()
-                          }
-                          onClick={
-                            addManualPlayer
-                          }
-                        >
-                          {addingManual
-                            ? 'Adding…'
-                            : 'Add Player'}
-                        </button>
-                      </div>
-
-                      <div
-                        className="notice"
-                        style={{
-                          marginTop: '10px'
-                        }}
-                      >
-                        Duplicate roll numbers
-                        in this pool are
-                        automatically blocked.
-                      </div>
-                    </div>
-                  )}
-
-                  {importOpen && (
-                    <div
-                      style={{
-                        marginTop: '14px'
-                      }}
-                    >
-                      <div className="eyebrow">
-                        CSV IMPORT
-                      </div>
-
-                      <div className="notice">
-                        CSV format:
-                        <br />
-                        <b>
-                          roll_number,name
-                        </b>
-                        <br />
-                        101,John
-                        <br />
-                        102,David
-                        <br />
-                        103,Arjun
-                      </div>
-
-                      <input
-                        className="field"
-                        style={{
-                          marginTop: '10px'
-                        }}
-                        type="file"
-                        accept=".csv,text/csv"
-                        onChange={e =>
-                          setImportFile(
-                            e.target.files?.[0] ||
-                              null
-                          )
-                        }
-                      />
-
-                      <div
-                        className="actions"
-                        style={{
-                          marginTop: '10px'
-                        }}
-                      >
-                        <button
-                          className="btn primary"
-                          disabled={
-                            importing ||
-                            !importFile
-                          }
-                          onClick={
-                            importPlayersFromCsv
-                          }
-                        >
-                          {importing
-                            ? 'Importing…'
-                            : 'Import CSV'}
-                        </button>
-
-                        <button
-                          className="btn"
-                          onClick={() => {
-                            setImportOpen(
-                              false
-                            )
-                            setImportFile(null)
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-
-                      <div
-                        className="notice"
-                        style={{
-                          marginTop: '10px'
-                        }}
-                      >
-                        ⚠️ Players already
-                        present in this pool
-                        will be skipped. Duplicate
-                        roll numbers inside the CSV
-                        will also be skipped.
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <PlayerManagement />
 
                 {rollOpen && (
                   <div
                     className="card"
-                    style={{
-                      marginTop: '16px'
-                    }}
+                    style={{ marginTop: '16px' }}
                   >
                     <div className="eyebrow">
                       NEXT PLAYER
@@ -1429,10 +1743,7 @@ function App() {
                           )
                         }
                         onKeyDown={e => {
-                          if (
-                            e.key ===
-                            'Enter'
-                          ) {
+                          if (e.key === 'Enter') {
                             startPlayerByRoll()
                           }
                         }}
@@ -1466,14 +1777,12 @@ function App() {
 
                     <div
                       className="notice"
-                      style={{
-                        marginTop: '12px'
-                      }}
+                      style={{ marginTop: '12px' }}
                     >
-                      Type the roll number of
-                      any available or UNSOLD
-                      player. A SOLD player
-                      cannot be entered again.
+                      Type the roll number of any
+                      available or UNSOLD player.
+                      A SOLD player cannot be
+                      entered again.
                     </div>
                   </div>
                 )}
@@ -1481,115 +1790,93 @@ function App() {
                 {c?.current_player && (
                   <div
                     className="card"
-                    style={{
-                      marginTop: '16px'
-                    }}
+                    style={{ marginTop: '16px' }}
                   >
                     <div className="eyebrow">
                       ADMIN BID CONTROL
                     </div>
 
                     <div className="teamPool">
-                      {c.current_player.name}
-                      {' • '}
-                      Bid History
+                      {c.current_player.name} • Bid
+                      History
                     </div>
 
                     {currentPlayerBids.length ===
                     0 ? (
                       <div className="notice">
-                        No bids yet. Player
-                        is open at <b>3 EP</b>.
+                        No bids yet. Player is open
+                        at <b>3 EP</b>.
                       </div>
                     ) : (
                       <>
                         <div
                           style={{
                             display: 'flex',
-                            flexDirection:
-                              'column',
+                            flexDirection: 'column',
                             gap: '8px',
-                            marginTop:
-                              '12px'
+                            marginTop: '12px'
                           }}
                         >
-                          {currentPlayerBids.map(
-                            b => (
-                              <div
-                                key={b.id}
-                                style={{
-                                  display:
-                                    'flex',
-                                  justifyContent:
-                                    'space-between',
-                                  alignItems:
-                                    'center',
-                                  gap: '10px',
-                                  padding:
-                                    '10px 12px',
-                                  border:
-                                    '1px solid rgba(255,255,255,.1)',
-                                  borderRadius:
-                                    '10px'
-                                }}
-                              >
-                                <div>
-                                  <strong>
-                                    {b.team
-                                      ?.name ||
-                                      'Unknown Team'}
-                                  </strong>
+                          {currentPlayerBids.map(b => (
+                            <div
+                              key={b.id}
+                              style={{
+                                display: 'flex',
+                                justifyContent:
+                                  'space-between',
+                                alignItems: 'center',
+                                gap: '10px',
+                                padding: '10px 12px',
+                                border:
+                                  '1px solid rgba(255,255,255,.1)',
+                                borderRadius: '10px'
+                              }}
+                            >
+                              <div>
+                                <strong>
+                                  {b.team?.name ||
+                                    'Unknown Team'}
+                                </strong>
 
-                                  <div
-                                    className="sub"
-                                    style={{
-                                      marginTop:
-                                        '2px'
-                                    }}
-                                  >
-                                    {b.amount} EP
-                                  </div>
-                                </div>
-
-                                <button
-                                  className="danger"
-                                  disabled={
-                                    deletingBid ===
-                                    b.id
-                                  }
-                                  onClick={() =>
-                                    deleteBid(
-                                      b.id
-                                    )
-                                  }
+                                <div
+                                  className="sub"
+                                  style={{
+                                    marginTop: '2px'
+                                  }}
                                 >
-                                  {deletingBid ===
-                                  b.id
-                                    ? 'Deleting…'
-                                    : '🗑 Delete'}
-                                </button>
+                                  {b.amount} EP
+                                </div>
                               </div>
-                            )
-                          )}
+
+                              <button
+                                className="danger"
+                                disabled={
+                                  deletingBid ===
+                                  b.id
+                                }
+                                onClick={() =>
+                                  deleteBid(b.id)
+                                }
+                              >
+                                {deletingBid === b.id
+                                  ? 'Deleting…'
+                                  : '🗑 Delete'}
+                              </button>
+                            </div>
+                          ))}
                         </div>
 
                         <div
                           className="actions"
-                          style={{
-                            marginTop:
-                              '12px'
-                          }}
+                          style={{ marginTop: '12px' }}
                         >
                           <button
                             className="danger"
-                            onClick={
-                              undoLastBid
-                            }
+                            onClick={undoLastBid}
                             disabled={
                               currentPlayerBids.length ===
                                 0 ||
-                              deletingBid !==
-                                null
+                              deletingBid !== null
                             }
                           >
                             ↩ Undo Last Bid
@@ -1618,13 +1905,9 @@ function App() {
                   <TeamCard
                     key={name}
                     name={name}
-                    balance={selectedBalance(
-                      name
-                    )}
+                    balance={selectedBalance(name)}
                     onClick={() =>
-                      openCurrentPoolTeam(
-                        name
-                      )
+                      openCurrentPoolTeam(name)
                     }
                   />
                 ))}
@@ -1642,24 +1925,16 @@ function App() {
 
   function teamsPage() {
     if (selectedTeam) {
-      const currentPoolPlayers =
-        currentPoolTeamPlayers(
-          selectedTeam
-        )
-
-      const allPlayers =
-        allPoolTeamPlayers(
-          selectedTeam
-        )
-
       return (
         <TeamDetails
           selectedTeam={selectedTeam}
           pool={pool}
           currentPoolPlayers={
-            currentPoolPlayers
+            currentPoolTeamPlayers(selectedTeam)
           }
-          allPlayers={allPlayers}
+          allPlayers={
+            allPoolTeamPlayers(selectedTeam)
+          }
           onBack={() =>
             setSelectedTeam(null)
           }
@@ -1678,18 +1953,14 @@ function App() {
         <div className="stats">
           {TEAM_NAMES.map(name => {
             const count =
-              allPoolTeamPlayers(
-                name
-              ).length
+              allPoolTeamPlayers(name).length
 
             return (
               <button
                 key={name}
                 className="stat"
                 onClick={() =>
-                  openAllPoolsTeam(
-                    name
-                  )
+                  openAllPoolsTeam(name)
                 }
                 style={{
                   cursor: 'pointer',
@@ -1706,9 +1977,7 @@ function App() {
 
                 <b>
                   {count} player
-                  {count === 1
-                    ? ''
-                    : 's'}
+                  {count === 1 ? '' : 's'}
                 </b>
 
                 <small>
@@ -1736,180 +2005,13 @@ function App() {
         />
 
         {mode === 'admin' && (
-          <div
-            className="card"
-            style={{
-              marginBottom: '16px'
-            }}
-          >
-            <div className="eyebrow">
-              PLAYER MANAGEMENT
-            </div>
-
-            <div className="actions">
-              <button
-                className="btn primary"
-                onClick={() => {
-                  setManualAddOpen(true)
-                  setImportOpen(false)
-                }}
-              >
-                ➕ Add Player Manually
-              </button>
-
-              <button
-                className="btn"
-                onClick={() => {
-                  setImportOpen(true)
-                  setManualAddOpen(false)
-                }}
-              >
-                📥 Import Players
-              </button>
-            </div>
-
-            {manualAddOpen && (
-              <div
-                style={{
-                  marginTop: '14px'
-                }}
-              >
-                <div className="eyebrow">
-                  MANUAL ENTRY
-                </div>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    gap: '10px',
-                    marginTop: '10px',
-                    flexWrap: 'wrap'
-                  }}
-                >
-                  <input
-                    className="field"
-                    style={{
-                      flex: '1',
-                      minWidth: '150px'
-                    }}
-                    inputMode="numeric"
-                    placeholder="Roll number"
-                    value={manualRoll}
-                    onChange={e =>
-                      setManualRoll(
-                        e.target.value
-                      )
-                    }
-                  />
-
-                  <input
-                    className="field"
-                    style={{
-                      flex: '2',
-                      minWidth: '200px'
-                    }}
-                    placeholder="Player name"
-                    value={manualName}
-                    onChange={e =>
-                      setManualName(
-                        e.target.value
-                      )
-                    }
-                  />
-
-                  <button
-                    className="btn primary"
-                    disabled={
-                      addingManual ||
-                      !manualRoll.trim() ||
-                      !manualName.trim()
-                    }
-                    onClick={
-                      addManualPlayer
-                    }
-                  >
-                    {addingManual
-                      ? 'Adding…'
-                      : 'Add Player'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {importOpen && (
-              <div
-                style={{
-                  marginTop: '14px'
-                }}
-              >
-                <div className="eyebrow">
-                  CSV IMPORT
-                </div>
-
-                <div className="notice">
-                  Required columns:
-                  <br />
-                  <b>roll_number,name</b>
-                  <br />
-                  Example:
-                  <br />
-                  101,John
-                  <br />
-                  102,David
-                </div>
-
-                <input
-                  className="field"
-                  style={{
-                    marginTop: '10px'
-                  }}
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={e =>
-                    setImportFile(
-                      e.target.files?.[0] ||
-                        null
-                    )
-                  }
-                />
-
-                <div
-                  className="actions"
-                  style={{
-                    marginTop: '10px'
-                  }}
-                >
-                  <button
-                    className="btn primary"
-                    disabled={
-                      importing ||
-                      !importFile
-                    }
-                    onClick={
-                      importPlayersFromCsv
-                    }
-                  >
-                    {importing
-                      ? 'Importing…'
-                      : 'Import CSV'}
-                  </button>
-
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setImportOpen(false)
-                      setImportFile(null)
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          <PlayerManagement />
         )}
 
-        <div className="card">
+        <div
+          className="card"
+          style={{ marginTop: '16px' }}
+        >
           <div className="notice">
             The selected pool is{' '}
             <b>{poolLabel(pool)}</b>.
@@ -1933,9 +2035,7 @@ function App() {
               {players.map(p => (
                 <tr key={p.id}>
                   <td>{p.roll_number}</td>
-
                   <td>{p.name}</td>
-
                   <td>{p.status}</td>
 
                   {mode === 'admin' && (
@@ -1943,20 +2043,16 @@ function App() {
                       <button
                         className="danger"
                         disabled={
-                          deletingPlayer ===
-                            p.id ||
+                          deletingPlayer === p.id ||
                           p.status === 'sold'
                         }
                         onClick={() =>
-                          deletePlayer(
-                            p.id
-                          )
+                          deletePlayer(p.id)
                         }
                       >
                         {p.status === 'sold'
                           ? 'Sold'
-                          : deletingPlayer ===
-                            p.id
+                          : deletingPlayer === p.id
                           ? 'Deleting…'
                           : '🗑 Delete'}
                       </button>
@@ -1969,8 +2065,8 @@ function App() {
 
           {players.length === 0 && (
             <div className="notice">
-              No players have been added to
-              this pool yet.
+              No players have been added to this
+              pool yet.
             </div>
           )}
         </div>
@@ -2009,17 +2105,14 @@ function App() {
               {history.map(x => (
                 <tr key={x.id}>
                   <td>
-                    {x.player
-                      ?.roll_number}{' '}
-                    —{' '}
+                    {x.player?.roll_number} —{' '}
                     {x.player?.name}
                   </td>
 
                   <td>{x.status}</td>
 
                   <td>
-                    {x.team?.name ||
-                      '—'}
+                    {x.team?.name || '—'}
                   </td>
 
                   <td>
@@ -2030,22 +2123,17 @@ function App() {
 
                   {mode === 'admin' && (
                     <td>
-                      {x.status ===
-                        'SOLD' && (
+                      {x.status === 'SOLD' && (
                         <button
                           className="danger"
                           disabled={
-                            undoingSale ===
-                            x.id
+                            undoingSale === x.id
                           }
                           onClick={() =>
-                            undoSoldPlayer(
-                              x.id
-                            )
+                            undoSoldPlayer(x.id)
                           }
                         >
-                          {undoingSale ===
-                          x.id
+                          {undoingSale === x.id
                             ? 'Undoing…'
                             : '↩ Undo Sale'}
                         </button>
@@ -2080,15 +2168,12 @@ function App() {
               className="stat"
               key={p.id}
             >
-              <span>
-                {poolLabel(p)}
-              </span>
+              <span>{poolLabel(p)}</span>
 
               <b>5 × 150 EP</b>
 
               <small>
-                Independent team
-                budgets
+                Independent team budgets
               </small>
             </div>
           ))}
@@ -2156,9 +2241,7 @@ function App() {
         <aside className="side">
           <div className="nav">
             <Nav
-              active={
-                page === 'auction'
-              }
+              active={page === 'auction'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('auction')
@@ -2168,9 +2251,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'players'
-              }
+              active={page === 'players'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('players')
@@ -2180,9 +2261,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'teams'
-              }
+              active={page === 'teams'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('teams')
@@ -2192,9 +2271,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'history'
-              }
+              active={page === 'history'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('history')
@@ -2204,9 +2281,7 @@ function App() {
             </Nav>
 
             <Nav
-              active={
-                page === 'pools'
-              }
+              active={page === 'pools'}
               onClick={() => {
                 setSelectedTeam(null)
                 setPage('pools')
@@ -2281,9 +2356,7 @@ function TeamDetails({
 
           <div className="sub">
             {viewMode === 'current'
-              ? `Players from ${poolLabel(
-                  pool
-                )}`
+              ? `Players from ${poolLabel(pool)}`
               : 'Players from all pools'}
           </div>
         </div>
@@ -2298,9 +2371,7 @@ function TeamDetails({
 
       <div
         className="actions"
-        style={{
-          marginBottom: '16px'
-        }}
+        style={{ marginBottom: '16px' }}
       >
         <button
           className={
@@ -2339,20 +2410,15 @@ function TeamDetails({
 
         <div
           className="teamPool"
-          style={{
-            marginBottom: '12px'
-          }}
+          style={{ marginBottom: '12px' }}
         >
-          {displayedPlayers.length}{' '}
-          player
-          {displayedPlayers.length ===
-          1
+          {displayedPlayers.length} player
+          {displayedPlayers.length === 1
             ? ''
             : 's'}
         </div>
 
-        {displayedPlayers.length ===
-        0 ? (
+        {displayedPlayers.length === 0 ? (
           <div className="notice">
             No players purchased by{' '}
             {selectedTeam}{' '}
@@ -2364,8 +2430,7 @@ function TeamDetails({
           <table className="table">
             <thead>
               <tr>
-                {viewMode ===
-                  'all' && (
+                {viewMode === 'all' && (
                   <th>Pool</th>
                 )}
 
@@ -2375,31 +2440,26 @@ function TeamDetails({
             </thead>
 
             <tbody>
-              {displayedPlayers.map(
-                x => (
-                  <tr key={x.id}>
-                    {viewMode ===
-                      'all' && (
-                      <td>
-                        {x.pool
-                          ? `${x.pool.batch_year} • ${x.pool.gender}`
-                          : '—'}
-                      </td>
-                    )}
-
+              {displayedPlayers.map(x => (
+                <tr key={x.id}>
+                  {viewMode === 'all' && (
                     <td>
-                      {x.player
-                        ?.roll_number}{' '}
-                      —{' '}
-                      {x.player?.name}
+                      {x.pool
+                        ? `${x.pool.batch_year} • ${x.pool.gender}`
+                        : '—'}
                     </td>
+                  )}
 
-                    <td>
-                      {x.final_price} EP
-                    </td>
-                  </tr>
-                )
-              )}
+                  <td>
+                    {x.player?.roll_number} —{' '}
+                    {x.player?.name}
+                  </td>
+
+                  <td>
+                    {x.final_price} EP
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}
@@ -2421,15 +2481,11 @@ function TeamCard({
     <div
       className="team"
       onClick={onClick}
-      style={{
-        cursor: 'pointer'
-      }}
+      style={{ cursor: 'pointer' }}
     >
       <div className="teamtop">
         <span
-          className={`teamname ${
-            TEAM_COLORS[name]
-          }`}
+          className={`teamname ${TEAM_COLORS[name]}`}
         >
           {name}
         </span>
@@ -2440,9 +2496,7 @@ function TeamCard({
       </div>
 
       <div
-        className={`bar ${
-          TEAM_COLORS[name]
-        }`}
+        className={`bar ${TEAM_COLORS[name]}`}
       >
         <i
           style={{
@@ -2450,8 +2504,7 @@ function TeamCard({
               0,
               Math.min(
                 100,
-                (balance / 150) *
-                  100
+                (balance / 150) * 100
               )
             )}%`
           }}
@@ -2510,9 +2563,7 @@ function Nav({
 }) {
   return (
     <button
-      className={
-        active ? 'active' : ''
-      }
+      className={active ? 'active' : ''}
       onClick={onClick}
     >
       {children}
@@ -2552,8 +2603,8 @@ function Login({
         </div>
 
         <div className="sub">
-          Only authenticated admins
-          can run the auction.
+          Only authenticated admins can
+          run the auction.
         </div>
 
         <input
@@ -2561,9 +2612,7 @@ function Login({
           placeholder="Admin email"
           value={email}
           onChange={e =>
-            setEmail(
-              e.target.value
-            )
+            setEmail(e.target.value)
           }
         />
 
@@ -2573,9 +2622,7 @@ function Login({
           placeholder="Password"
           value={password}
           onChange={e =>
-            setPassword(
-              e.target.value
-            )
+            setPassword(e.target.value)
           }
         />
 
@@ -2618,13 +2665,11 @@ function SetupScreen() {
         </div>
 
         <p className="sub">
-          Add
-          VITE_SUPABASE_URL and
-          VITE_SUPABASE_ANON_KEY
-          to your Vercel environment
-          variables, run the supplied
-          SQL in Supabase, then
-          redeploy.
+          Add VITE_SUPABASE_URL and
+          VITE_SUPABASE_ANON_KEY to your
+          Vercel environment variables,
+          run the supplied SQL in
+          Supabase, then redeploy.
         </p>
       </div>
     </div>
