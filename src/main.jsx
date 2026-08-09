@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import './styles.css'
@@ -12,6 +12,10 @@ const TEAM_COLORS = {
 }
 
 const TEAM_NAMES = Object.keys(TEAM_COLORS)
+
+/* =========================================================
+   APP
+========================================================= */
 
 function App() {
   const [mode, setMode] = useState('public')
@@ -44,14 +48,23 @@ function App() {
   const [undoingSale, setUndoingSale] = useState(null)
   const [deletingPlayer, setDeletingPlayer] = useState(null)
 
-  const [importingPlayers, setImportingPlayers] = useState(false)
+  const [manualAddOpen, setManualAddOpen] = useState(false)
+  const [manualRoll, setManualRoll] = useState('')
+  const [manualName, setManualName] = useState('')
+  const [addingManual, setAddingManual] = useState(false)
 
-  const fileInputRef = useRef(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importFile, setImportFile] = useState(null)
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
     [teams]
   )
+
+  /* =========================================================
+     AUTH
+  ========================================================= */
 
   useEffect(() => {
     if (!supabaseConfigured) {
@@ -76,6 +89,10 @@ function App() {
       sub.subscription.unsubscribe()
     }
   }, [])
+
+  /* =========================================================
+     INITIAL LOAD
+  ========================================================= */
 
   useEffect(() => {
     loadBase()
@@ -257,6 +274,10 @@ function App() {
     }, 3500)
   }
 
+  /* =========================================================
+     LOGIN
+  ========================================================= */
+
   async function login(email, password) {
     if (!supabase) return
 
@@ -279,55 +300,126 @@ function App() {
     setMode('public')
   }
 
-  /*
-   * =========================================================
-   * CSV IMPORT
-   * =========================================================
-   *
-   * Expected Google Sheet columns:
-   *
-   * Roll Number | Name
-   *
-   * Also accepts:
-   *
-   * roll_number | name
-   * roll | name
-   * Roll No | Player Name
-   *
-   * The import is always tied to the CURRENT selected pool.
-   */
+  /* =========================================================
+     MANUAL PLAYER ADD
+  ========================================================= */
 
-  function cleanCsvValue(value) {
-    if (value === null || value === undefined) {
-      return ''
+  async function addManualPlayer() {
+    if (!session) {
+      setLoginOpen(true)
+      return
     }
 
-    return String(value)
-      .replace(/^\uFEFF/, '')
-      .trim()
+    if (!pool) {
+      notify('Select a pool first')
+      return
+    }
+
+    const roll = manualRoll.trim()
+    const name = manualName.trim()
+
+    if (!roll || !name) {
+      notify('Enter both roll number and player name')
+      return
+    }
+
+    /* Duplicate protection */
+    const duplicate = players.some(
+      p =>
+        String(p.roll_number).trim().toLowerCase() ===
+        roll.toLowerCase()
+    )
+
+    if (duplicate) {
+      notify(
+        `Roll number ${roll} already exists in ${poolLabel(pool)}`
+      )
+      return
+    }
+
+    setAddingManual(true)
+
+    const { error } = await supabase
+      .from('players')
+      .insert({
+        pool_id: pool.id,
+        roll_number: roll,
+        name,
+        status: 'available'
+      })
+
+    setAddingManual(false)
+
+    if (error) {
+      if (
+        error.code === '23505' ||
+        String(error.message || '').toLowerCase().includes('duplicate')
+      ) {
+        notify(`Roll number ${roll} already exists`)
+      } else {
+        notify(error.message)
+      }
+      return
+    }
+
+    setManualRoll('')
+    setManualName('')
+    setManualAddOpen(false)
+
+    notify(`${name} added successfully`)
+    await loadPool()
   }
 
-  function parseCSV(text) {
+  /* =========================================================
+     CSV IMPORT
+     
+     Expected CSV:
+     
+     roll_number,name
+     101,John
+     102,David
+     103,Arjun
+     
+     Also accepts:
+     roll,name
+  ========================================================= */
+
+  function normalizeCsvHeader(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\uFEFF/, '')
+      .replace(/\s+/g, '_')
+  }
+
+  function parseCsv(text) {
     const rows = []
     let row = []
-    let value = ''
+    let cell = ''
     let insideQuotes = false
 
     for (let i = 0; i < text.length; i++) {
       const char = text[i]
       const next = text[i + 1]
 
+      if (char === '"' && insideQuotes && next === '"') {
+        cell += '"'
+        i++
+        continue
+      }
+
       if (char === '"') {
-        if (insideQuotes && next === '"') {
-          value += '"'
-          i++
-        } else {
-          insideQuotes = !insideQuotes
-        }
-      } else if (char === ',' && !insideQuotes) {
-        row.push(value)
-        value = ''
-      } else if (
+        insideQuotes = !insideQuotes
+        continue
+      }
+
+      if (char === ',' && !insideQuotes) {
+        row.push(cell)
+        cell = ''
+        continue
+      }
+
+      if (
         (char === '\n' || char === '\r') &&
         !insideQuotes
       ) {
@@ -335,233 +427,203 @@ function App() {
           i++
         }
 
-        row.push(value)
-        value = ''
+        row.push(cell)
+        cell = ''
 
-        if (row.some(cell => cleanCsvValue(cell) !== '')) {
+        if (row.some(x => String(x).trim() !== '')) {
           rows.push(row)
         }
 
         row = []
-      } else {
-        value += char
+        continue
       }
+
+      cell += char
     }
 
-    if (value !== '' || row.length > 0) {
-      row.push(value)
+    row.push(cell)
 
-      if (row.some(cell => cleanCsvValue(cell) !== '')) {
-        rows.push(row)
-      }
+    if (row.some(x => String(x).trim() !== '')) {
+      rows.push(row)
     }
 
     return rows
   }
 
-  function normaliseHeader(header) {
-    return cleanCsvValue(header)
-      .toLowerCase()
-      .replace(/[\s_-]+/g, '')
-  }
-
-  function findColumn(headers, possibleNames) {
-    for (const name of possibleNames) {
-      const index = headers.findIndex(
-        h => normaliseHeader(h) === normaliseHeader(name)
-      )
-
-      if (index !== -1) {
-        return index
-      }
-    }
-
-    return -1
-  }
-
-  async function handlePlayerCSV(event) {
-    const file = event.target.files?.[0]
-
-    if (!file) return
-
+  async function importPlayersFromCsv() {
     if (!session) {
       setLoginOpen(true)
-      event.target.value = ''
       return
     }
 
     if (!pool) {
       notify('Select a pool first')
-      event.target.value = ''
       return
     }
 
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      notify('Please export your Google Sheet as CSV first')
-      event.target.value = ''
+    if (!importFile) {
+      notify('Choose a CSV file first')
       return
     }
 
-    setImportingPlayers(true)
+    setImporting(true)
 
     try {
-      const text = await file.text()
-      const rows = parseCSV(text)
+      const text = await importFile.text()
+      const rows = parseCsv(text)
 
-      if (!rows.length) {
-        throw new Error('The CSV file is empty')
+      if (rows.length < 2) {
+        notify('CSV must contain a header and at least one player')
+        setImporting(false)
+        return
       }
 
-      const headers = rows[0]
+      const headers = rows[0].map(normalizeCsvHeader)
 
-      const rollIndex = findColumn(headers, [
-        'roll_number',
-        'roll number',
-        'roll no',
-        'rollno',
-        'roll',
-        'roll_number.'
-      ])
+      const rollIndex = headers.findIndex(
+        h =>
+          h === 'roll_number' ||
+          h === 'roll' ||
+          h === 'roll_no' ||
+          h === 'rollno'
+      )
 
-      const nameIndex = findColumn(headers, [
-        'name',
-        'player name',
-        'player_name',
-        'playername'
-      ])
+      const nameIndex = headers.findIndex(
+        h =>
+          h === 'name' ||
+          h === 'player_name' ||
+          h === 'player'
+      )
 
-      if (rollIndex === -1) {
-        throw new Error(
-          'Could not find Roll Number column'
+      if (rollIndex === -1 || nameIndex === -1) {
+        notify(
+          'CSV needs columns named roll_number and name'
         )
+        setImporting(false)
+        return
       }
 
-      if (nameIndex === -1) {
-        throw new Error(
-          'Could not find Name column'
+      /* Existing rolls in this pool */
+      const existingRolls = new Set(
+        players.map(p =>
+          String(p.roll_number)
+            .trim()
+            .toLowerCase()
         )
-      }
+      )
 
-      const imported = []
-      const seenRolls = new Set()
+      const seenInCsv = new Set()
 
-      let duplicateRows = 0
-      let emptyRows = 0
+      const validPlayers = []
+      const skippedDuplicates = []
+      const skippedInvalid = []
 
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i]
 
-        const roll = cleanCsvValue(row[rollIndex])
-        const name = cleanCsvValue(row[nameIndex])
+        const roll = String(row[rollIndex] || '').trim()
+        const name = String(row[nameIndex] || '').trim()
 
         if (!roll || !name) {
-          emptyRows++
+          skippedInvalid.push(i + 1)
           continue
         }
 
-        /*
-         * Duplicate protection INSIDE the CSV itself.
-         *
-         * If Google Sheet accidentally contains:
-         *
-         * 101 John
-         * 101 John
-         *
-         * only one is sent to Supabase.
-         */
-        const rollKey = roll.toLowerCase()
+        const normalizedRoll = roll.toLowerCase()
 
-        if (seenRolls.has(rollKey)) {
-          duplicateRows++
+        /* Duplicate already in database */
+        if (existingRolls.has(normalizedRoll)) {
+          skippedDuplicates.push({
+            roll,
+            reason: 'Already exists'
+          })
           continue
         }
 
-        seenRolls.add(rollKey)
+        /* Duplicate within same CSV */
+        if (seenInCsv.has(normalizedRoll)) {
+          skippedDuplicates.push({
+            roll,
+            reason: 'Duplicate in CSV'
+          })
+          continue
+        }
 
-        imported.push({
+        seenInCsv.add(normalizedRoll)
+
+        validPlayers.push({
+          pool_id: pool.id,
           roll_number: roll,
-          name
+          name,
+          status: 'available'
         })
       }
 
-      if (!imported.length) {
-        throw new Error(
-          'No valid players were found in the CSV'
+      if (validPlayers.length === 0) {
+        setImporting(false)
+
+        notify(
+          `Nothing imported • ${skippedDuplicates.length} duplicate(s), ${skippedInvalid.length} invalid row(s)`
         )
+
+        return
       }
 
-      /*
-       * Send the complete list to the secure Supabase RPC.
-       *
-       * The database function:
-       *
-       * - checks admin access
-       * - checks pool
-       * - finds existing roll numbers
-       * - updates existing unsold players
-       * - keeps SOLD players safe
-       * - inserts genuinely new players
-       */
-      const { data, error } = await supabase.rpc(
-        'import_players',
-        {
-          p_pool_id: pool.id,
-          p_players: imported
-        }
-      )
+      const { error } = await supabase
+        .from('players')
+        .insert(validPlayers)
 
       if (error) {
-        throw new Error(error.message)
+        /*
+         * If the database has a unique constraint,
+         * this also protects against duplicates inserted
+         * by another admin at exactly the same time.
+         */
+        if (
+          error.code === '23505' ||
+          String(error.message || '')
+            .toLowerCase()
+            .includes('duplicate')
+        ) {
+          notify(
+            'Import stopped because one or more roll numbers already exist.'
+          )
+        } else {
+          notify(error.message)
+        }
+
+        setImporting(false)
+        return
       }
+
+      setImportFile(null)
+      setImportOpen(false)
+
+      const message =
+        `Imported ${validPlayers.length} player(s)` +
+        (skippedDuplicates.length
+          ? ` • Skipped ${skippedDuplicates.length} duplicate(s)`
+          : '') +
+        (skippedInvalid.length
+          ? ` • Skipped ${skippedInvalid.length} invalid row(s)`
+          : '')
+
+      notify(message)
 
       await loadPool()
-
-      const added = Number(data || 0)
-
-      notify(
-        `Import complete • ${added} new player${
-          added === 1 ? '' : 's'
-        } added`
-      )
-
-      if (duplicateRows > 0 || emptyRows > 0) {
-        setTimeout(() => {
-          notify(
-            `${duplicateRows} duplicate row${
-              duplicateRows === 1 ? '' : 's'
-            } skipped • ${emptyRows} empty row${
-              emptyRows === 1 ? '' : 's'
-            } skipped`
-          )
-        }, 3800)
-      }
     } catch (error) {
       notify(
         error?.message ||
-          'Player import failed'
+          'Could not read the CSV file'
       )
-    } finally {
-      setImportingPlayers(false)
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
     }
+
+    setImporting(false)
   }
 
-  function openImportPicker() {
-    if (!session) {
-      setLoginOpen(true)
-      return
-    }
-
-    if (!pool) {
-      notify('Select a pool first')
-      return
-    }
-
-    fileInputRef.current?.click()
-  }
+  /* =========================================================
+     AUCTION
+  ========================================================= */
 
   async function startPlayerByRoll() {
     if (!session) {
@@ -609,12 +671,6 @@ function App() {
     notify(`Player ${roll} entered auction`)
     await loadPool()
   }
-
-  /*
-   * =========================================================
-   * BIDDING
-   * =========================================================
-   */
 
   async function bid(teamName) {
     const team = teamMap[teamName]
@@ -695,6 +751,10 @@ function App() {
       await loadPool()
     }
   }
+
+  /* =========================================================
+     BID MANAGEMENT
+  ========================================================= */
 
   async function deleteBid(id) {
     if (!session) {
@@ -867,6 +927,10 @@ function App() {
     }
   }
 
+  /* =========================================================
+     HELPERS
+  ========================================================= */
+
   const selectedBalance = name =>
     balances.find(
       x =>
@@ -923,9 +987,7 @@ function App() {
   const displayedBidAmount =
     currentPlayerBids.length === 0
       ? 3
-      : nextBid(
-          current?.current_bid
-        )
+      : nextBid(current?.current_bid)
 
   function currentPoolTeamPlayers(teamName) {
     if (!pool) return []
@@ -954,6 +1016,10 @@ function App() {
     setSelectedTeam(teamName)
     setPage('teams')
   }
+
+  /* =========================================================
+     AUCTION PAGE
+  ========================================================= */
 
   function auction() {
     const c = current
@@ -985,8 +1051,8 @@ function App() {
               setPool(
                 pools.find(
                   x =>
-                    x.id ===
-                    e.target.value
+                    String(x.id) ===
+                    String(e.target.value)
                 )
               )
             }}
@@ -1104,6 +1170,224 @@ function App() {
                   >
                     NEXT PLAYER
                   </button>
+                </div>
+
+                {/* =================================================
+                    PLAYER ENTRY TOOLS
+                ================================================= */}
+
+                <div
+                  className="card"
+                  style={{
+                    marginTop: '16px'
+                  }}
+                >
+                  <div className="eyebrow">
+                    PLAYER MANAGEMENT
+                  </div>
+
+                  <div className="teamPool">
+                    Add players to{' '}
+                    {poolLabel(pool)}
+                  </div>
+
+                  <div
+                    className="actions"
+                    style={{
+                      marginTop: '12px'
+                    }}
+                  >
+                    <button
+                      className="btn primary"
+                      onClick={() => {
+                        setManualAddOpen(
+                          !manualAddOpen
+                        )
+                        setImportOpen(false)
+                      }}
+                    >
+                      ➕ Add Player Manually
+                    </button>
+
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setImportOpen(
+                          !importOpen
+                        )
+                        setManualAddOpen(false)
+                      }}
+                    >
+                      📥 Import Players
+                    </button>
+                  </div>
+
+                  {manualAddOpen && (
+                    <div
+                      style={{
+                        marginTop: '14px'
+                      }}
+                    >
+                      <div className="eyebrow">
+                        MANUAL ENTRY
+                      </div>
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: '10px',
+                          marginTop: '10px',
+                          flexWrap: 'wrap'
+                        }}
+                      >
+                        <input
+                          className="field"
+                          style={{
+                            flex: '1',
+                            minWidth: '150px'
+                          }}
+                          inputMode="numeric"
+                          placeholder="Roll number"
+                          value={manualRoll}
+                          onChange={e =>
+                            setManualRoll(
+                              e.target.value
+                            )
+                          }
+                        />
+
+                        <input
+                          className="field"
+                          style={{
+                            flex: '2',
+                            minWidth: '200px'
+                          }}
+                          placeholder="Player name"
+                          value={manualName}
+                          onChange={e =>
+                            setManualName(
+                              e.target.value
+                            )
+                          }
+                        />
+
+                        <button
+                          className="btn primary"
+                          disabled={
+                            addingManual ||
+                            !manualRoll.trim() ||
+                            !manualName.trim()
+                          }
+                          onClick={
+                            addManualPlayer
+                          }
+                        >
+                          {addingManual
+                            ? 'Adding…'
+                            : 'Add Player'}
+                        </button>
+                      </div>
+
+                      <div
+                        className="notice"
+                        style={{
+                          marginTop: '10px'
+                        }}
+                      >
+                        Duplicate roll numbers
+                        in this pool are
+                        automatically blocked.
+                      </div>
+                    </div>
+                  )}
+
+                  {importOpen && (
+                    <div
+                      style={{
+                        marginTop: '14px'
+                      }}
+                    >
+                      <div className="eyebrow">
+                        CSV IMPORT
+                      </div>
+
+                      <div className="notice">
+                        CSV format:
+                        <br />
+                        <b>
+                          roll_number,name
+                        </b>
+                        <br />
+                        101,John
+                        <br />
+                        102,David
+                        <br />
+                        103,Arjun
+                      </div>
+
+                      <input
+                        className="field"
+                        style={{
+                          marginTop: '10px'
+                        }}
+                        type="file"
+                        accept=".csv,text/csv"
+                        onChange={e =>
+                          setImportFile(
+                            e.target.files?.[0] ||
+                              null
+                          )
+                        }
+                      />
+
+                      <div
+                        className="actions"
+                        style={{
+                          marginTop: '10px'
+                        }}
+                      >
+                        <button
+                          className="btn primary"
+                          disabled={
+                            importing ||
+                            !importFile
+                          }
+                          onClick={
+                            importPlayersFromCsv
+                          }
+                        >
+                          {importing
+                            ? 'Importing…'
+                            : 'Import CSV'}
+                        </button>
+
+                        <button
+                          className="btn"
+                          onClick={() => {
+                            setImportOpen(
+                              false
+                            )
+                            setImportFile(null)
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+
+                      <div
+                        className="notice"
+                        style={{
+                          marginTop: '10px'
+                        }}
+                      >
+                        ⚠️ Players already
+                        present in this pool
+                        will be skipped. Duplicate
+                        roll numbers inside the CSV
+                        will also be skipped.
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {rollOpen && (
@@ -1352,6 +1636,10 @@ function App() {
     )
   }
 
+  /* =========================================================
+     TEAMS
+  ========================================================= */
+
   function teamsPage() {
     if (selectedTeam) {
       const currentPoolPlayers =
@@ -1434,87 +1722,194 @@ function App() {
     )
   }
 
+  /* =========================================================
+     PLAYERS
+  ========================================================= */
+
   function playersPage() {
     return (
       <>
-        <div className="sectionhead">
-          <div>
+        <Header
+          eyebrow="PLAYERS"
+          title="PLAYERS"
+          sub={`Players in ${poolLabel(pool)}`}
+        />
+
+        {mode === 'admin' && (
+          <div
+            className="card"
+            style={{
+              marginBottom: '16px'
+            }}
+          >
             <div className="eyebrow">
-              PLAYERS
+              PLAYER MANAGEMENT
             </div>
 
-            <div className="title">
-              PLAYERS
-            </div>
-
-            <div className="sub">
-              Players in {poolLabel(pool)}
-            </div>
-          </div>
-
-          {mode === 'admin' && (
-            <div
-              style={{
-                display: 'flex',
-                gap: '10px',
-                flexWrap: 'wrap'
-              }}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,text/csv"
-                style={{ display: 'none' }}
-                onChange={
-                  handlePlayerCSV
-                }
-              />
-
+            <div className="actions">
               <button
                 className="btn primary"
-                onClick={openImportPicker}
-                disabled={importingPlayers}
-              >
-                {importingPlayers
-                  ? 'Importing…'
-                  : '📥 IMPORT PLAYERS'}
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          {mode === 'admin' && (
-            <div
-              className="notice"
-              style={{
-                marginBottom: '16px'
-              }}
-            >
-              <b>Google Sheets import</b>
-              <br />
-
-              Export your Google Sheet as{' '}
-              <b>CSV</b> and upload it here.
-              <br />
-
-              Required columns:{' '}
-              <b>Roll Number</b> and{' '}
-              <b>Name</b>.
-              <br />
-
-              <span
-                style={{
-                  opacity: 0.8
+                onClick={() => {
+                  setManualAddOpen(true)
+                  setImportOpen(false)
                 }}
               >
-                Re-importing a list containing
-                old + new players will not
-                create duplicate players.
-              </span>
-            </div>
-          )}
+                ➕ Add Player Manually
+              </button>
 
+              <button
+                className="btn"
+                onClick={() => {
+                  setImportOpen(true)
+                  setManualAddOpen(false)
+                }}
+              >
+                📥 Import Players
+              </button>
+            </div>
+
+            {manualAddOpen && (
+              <div
+                style={{
+                  marginTop: '14px'
+                }}
+              >
+                <div className="eyebrow">
+                  MANUAL ENTRY
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '10px',
+                    marginTop: '10px',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <input
+                    className="field"
+                    style={{
+                      flex: '1',
+                      minWidth: '150px'
+                    }}
+                    inputMode="numeric"
+                    placeholder="Roll number"
+                    value={manualRoll}
+                    onChange={e =>
+                      setManualRoll(
+                        e.target.value
+                      )
+                    }
+                  />
+
+                  <input
+                    className="field"
+                    style={{
+                      flex: '2',
+                      minWidth: '200px'
+                    }}
+                    placeholder="Player name"
+                    value={manualName}
+                    onChange={e =>
+                      setManualName(
+                        e.target.value
+                      )
+                    }
+                  />
+
+                  <button
+                    className="btn primary"
+                    disabled={
+                      addingManual ||
+                      !manualRoll.trim() ||
+                      !manualName.trim()
+                    }
+                    onClick={
+                      addManualPlayer
+                    }
+                  >
+                    {addingManual
+                      ? 'Adding…'
+                      : 'Add Player'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {importOpen && (
+              <div
+                style={{
+                  marginTop: '14px'
+                }}
+              >
+                <div className="eyebrow">
+                  CSV IMPORT
+                </div>
+
+                <div className="notice">
+                  Required columns:
+                  <br />
+                  <b>roll_number,name</b>
+                  <br />
+                  Example:
+                  <br />
+                  101,John
+                  <br />
+                  102,David
+                </div>
+
+                <input
+                  className="field"
+                  style={{
+                    marginTop: '10px'
+                  }}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={e =>
+                    setImportFile(
+                      e.target.files?.[0] ||
+                        null
+                    )
+                  }
+                />
+
+                <div
+                  className="actions"
+                  style={{
+                    marginTop: '10px'
+                  }}
+                >
+                  <button
+                    className="btn primary"
+                    disabled={
+                      importing ||
+                      !importFile
+                    }
+                    onClick={
+                      importPlayersFromCsv
+                    }
+                  >
+                    {importing
+                      ? 'Importing…'
+                      : 'Import CSV'}
+                  </button>
+
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      setImportOpen(false)
+                      setImportFile(null)
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="card">
           <div className="notice">
             The selected pool is{' '}
             <b>{poolLabel(pool)}</b>.
@@ -1528,7 +1923,6 @@ function App() {
                 <th>Roll</th>
                 <th>Name</th>
                 <th>Status</th>
-
                 {mode === 'admin' && (
                   <th>Action</th>
                 )}
@@ -1538,17 +1932,11 @@ function App() {
             <tbody>
               {players.map(p => (
                 <tr key={p.id}>
-                  <td>
-                    {p.roll_number}
-                  </td>
+                  <td>{p.roll_number}</td>
 
-                  <td>
-                    {p.name}
-                  </td>
+                  <td>{p.name}</td>
 
-                  <td>
-                    {p.status}
-                  </td>
+                  <td>{p.status}</td>
 
                   {mode === 'admin' && (
                     <td>
@@ -1590,6 +1978,10 @@ function App() {
     )
   }
 
+  /* =========================================================
+     HISTORY
+  ========================================================= */
+
   function historyPage() {
     return (
       <>
@@ -1607,7 +1999,6 @@ function App() {
                 <th>Result</th>
                 <th>Team</th>
                 <th>Price</th>
-
                 {mode === 'admin' && (
                   <th>Action</th>
                 )}
@@ -1624,9 +2015,7 @@ function App() {
                     {x.player?.name}
                   </td>
 
-                  <td>
-                    {x.status}
-                  </td>
+                  <td>{x.status}</td>
 
                   <td>
                     {x.team?.name ||
@@ -1672,6 +2061,10 @@ function App() {
     )
   }
 
+  /* =========================================================
+     POOLS
+  ========================================================= */
+
   function poolsPage() {
     return (
       <>
@@ -1703,6 +2096,10 @@ function App() {
       </>
     )
   }
+
+  /* =========================================================
+     RENDER
+  ========================================================= */
 
   if (loading) {
     return (
@@ -1850,6 +2247,10 @@ function App() {
     </div>
   )
 }
+
+/* =========================================================
+   TEAM DETAILS
+========================================================= */
 
 function TeamDetails({
   selectedTeam,
@@ -2007,6 +2408,10 @@ function TeamDetails({
   )
 }
 
+/* =========================================================
+   TEAM CARD
+========================================================= */
+
 function TeamCard({
   name,
   balance,
@@ -2066,6 +2471,10 @@ function TeamCard({
   )
 }
 
+/* =========================================================
+   HEADER
+========================================================= */
+
 function Header({
   eyebrow,
   title,
@@ -2090,6 +2499,10 @@ function Header({
   )
 }
 
+/* =========================================================
+   NAV
+========================================================= */
+
 function Nav({
   active,
   onClick,
@@ -2107,11 +2520,19 @@ function Nav({
   )
 }
 
+/* =========================================================
+   POOL LABEL
+========================================================= */
+
 function poolLabel(p) {
   return p
     ? `${p.batch_year} • ${p.gender}`
     : '—'
 }
+
+/* =========================================================
+   LOGIN
+========================================================= */
 
 function Login({
   onLogin,
@@ -2183,6 +2604,10 @@ function Login({
   )
 }
 
+/* =========================================================
+   SETUP SCREEN
+========================================================= */
+
 function SetupScreen() {
   return (
     <div className="loading">
@@ -2205,6 +2630,10 @@ function SetupScreen() {
     </div>
   )
 }
+
+/* =========================================================
+   ROOT
+========================================================= */
 
 createRoot(
   document.getElementById('root')
