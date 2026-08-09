@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import './styles.css'
@@ -63,6 +63,21 @@ function App() {
 
   const [auctionAnnouncement, setAuctionAnnouncement] =
     useState(null)
+
+  /*
+   * =========================================================
+   * AUCTION ANNOUNCEMENT SYNC
+   *
+   * These refs allow every connected browser to detect a
+   * newly-created auction result through Supabase realtime.
+   *
+   * Existing results on initial page load are remembered but
+   * are NOT displayed as announcements.
+   * =========================================================
+   */
+
+  const seenAuctionResultIds = useRef(new Set())
+  const auctionHistoryInitialized = useRef(false)
 
   useEffect(() => {
     if (!auctionAnnouncement) return
@@ -135,6 +150,15 @@ function App() {
 
   useEffect(() => {
     if (!pool || !supabaseConfigured) return
+
+    /*
+     * Reset the result-tracking state when switching pools.
+     *
+     * This prevents results from one pool being compared
+     * against results from another pool.
+     */
+    seenAuctionResultIds.current = new Set()
+    auctionHistoryInitialized.current = false
 
     loadPool()
 
@@ -293,6 +317,66 @@ function App() {
     setPlayers(ps.data || [])
     setHistory(hist.data || [])
     setBids(bidData.data || [])
+
+    /*
+     * =========================================================
+     * PUBLIC AUCTION ANNOUNCEMENT SYNC
+     *
+     * On the first load, remember all existing results.
+     * This prevents an old SOLD/UNSOLD result from appearing
+     * when somebody first opens the website.
+     *
+     * After initialization, only newly-created results are
+     * displayed as announcements.
+     * =========================================================
+     */
+
+    if (!auctionHistoryInitialized.current) {
+      ;(hist.data || []).forEach(result => {
+        seenAuctionResultIds.current.add(result.id)
+      })
+
+      auctionHistoryInitialized.current = true
+    } else {
+      const newResults =
+        (hist.data || []).filter(
+          result =>
+            !seenAuctionResultIds.current.has(result.id)
+        )
+
+      newResults.forEach(result => {
+        seenAuctionResultIds.current.add(result.id)
+
+        if (
+          result.status !== 'SOLD' &&
+          result.status !== 'UNSOLD'
+        ) {
+          return
+        }
+
+        if (result.status === 'SOLD') {
+          setAuctionAnnouncement({
+            type: 'SOLD',
+            playerName:
+              result.player?.name || 'Player',
+            rollNumber:
+              result.player?.roll_number || '—',
+            teamName:
+              result.team?.name || 'Unknown Team',
+            price:
+              result.final_price
+          })
+        } else {
+          setAuctionAnnouncement({
+            type: 'UNSOLD',
+            playerName:
+              result.player?.name || 'Player',
+            rollNumber:
+              result.player?.roll_number || '—'
+          })
+        }
+      })
+    }
 
     const { data: completeHistory } =
       await supabase
@@ -1347,6 +1431,344 @@ function App() {
   }
 
   /* =========================================================
+     PLAYER MANAGEMENT
+  ========================================================= */
+
+  function PlayerManagement() {
+    const hasLivePlayer =
+      !!current?.current_player_id
+
+    return (
+      <div
+        className="card"
+        style={{ marginTop: '16px' }}
+      >
+        <div className="eyebrow">
+          PLAYER MANAGEMENT
+        </div>
+
+        <div className="teamPool">
+          {poolLabel(pool)}
+        </div>
+
+        <div
+          className="actions"
+          style={{ marginTop: '12px' }}
+        >
+          <button
+            className="btn primary"
+            onClick={() => {
+              setManualAddOpen(!manualAddOpen)
+              setImportOpen(false)
+              setManualSoldOpen(false)
+            }}
+          >
+            ➕ Add Player Manually
+          </button>
+
+          <button
+            className="btn"
+            onClick={() => {
+              setImportOpen(!importOpen)
+              setManualAddOpen(false)
+              setManualSoldOpen(false)
+            }}
+          >
+            📥 Import Players
+          </button>
+
+          <button
+            className="btn"
+            disabled={
+              !hasLivePlayer ||
+              !!auctionAnnouncement
+            }
+            onClick={() => {
+              if (!hasLivePlayer) {
+                notify(
+                  'Manual SOLD is available only for the current bidding player'
+                )
+                return
+              }
+
+              setManualSoldOpen(!manualSoldOpen)
+              setManualAddOpen(false)
+              setImportOpen(false)
+
+              if (!manualSoldOpen) {
+                setManualSoldTeam('')
+                setManualSoldPoints('')
+              }
+            }}
+          >
+            💰 Manual SOLD
+          </button>
+        </div>
+
+        {manualAddOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              MANUAL ENTRY
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: '10px',
+                marginTop: '10px',
+                flexWrap: 'wrap'
+              }}
+            >
+              <input
+                className="field"
+                style={{
+                  flex: '1',
+                  minWidth: '150px'
+                }}
+                inputMode="numeric"
+                placeholder="Roll number"
+                value={manualRoll}
+                onChange={e =>
+                  setManualRoll(e.target.value)
+                }
+              />
+
+              <input
+                className="field"
+                style={{
+                  flex: '2',
+                  minWidth: '200px'
+                }}
+                placeholder="Player name"
+                value={manualName}
+                onChange={e =>
+                  setManualName(e.target.value)
+                }
+              />
+
+              <button
+                className="btn primary"
+                disabled={
+                  addingManual ||
+                  !manualRoll.trim() ||
+                  !manualName.trim()
+                }
+                onClick={addManualPlayer}
+              >
+                {addingManual
+                  ? 'Adding…'
+                  : 'Add Player'}
+              </button>
+            </div>
+
+            <div
+              className="notice"
+              style={{ marginTop: '10px' }}
+            >
+              Player will be added to{' '}
+              <b>{poolLabel(pool)}</b>.
+            </div>
+          </div>
+        )}
+
+        {importOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              CSV IMPORT
+            </div>
+
+            <div className="notice">
+              <b>CSV format:</b>
+              <br />
+              roll_number,name
+              <br />
+              101,John
+              <br />
+              102,David
+              <br />
+              <br />
+              Or:
+              <br />
+              <b>
+                batch,gender,roll_number,name
+              </b>
+              <br />
+              <br />
+              If batch/gender are missing,
+              the selected pool is used.
+            </div>
+
+            <input
+              className="field"
+              style={{ marginTop: '10px' }}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={e =>
+                setImportFile(
+                  e.target.files?.[0] || null
+                )
+              }
+            />
+
+            <div
+              className="actions"
+              style={{ marginTop: '10px' }}
+            >
+              <button
+                className="btn primary"
+                disabled={
+                  importing || !importFile
+                }
+                onClick={importPlayersFromCsv}
+              >
+                {importing
+                  ? 'Importing…'
+                  : 'Import CSV'}
+              </button>
+
+              <button
+                className="btn"
+                onClick={() => {
+                  setImportOpen(false)
+                  setImportFile(null)
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {manualSoldOpen && (
+          <div style={{ marginTop: '14px' }}>
+            <div className="eyebrow">
+              MANUAL SOLD
+            </div>
+
+            {current?.current_player ? (
+              <>
+                <div
+                  className="card"
+                  style={{ marginTop: '10px' }}
+                >
+                  <div className="eyebrow">
+                    CURRENT BIDDING PLAYER
+                  </div>
+
+                  <div
+                    className="playername"
+                    style={{
+                      fontSize: '28px',
+                      marginTop: '5px'
+                    }}
+                  >
+                    {current.current_player.name}
+                  </div>
+
+                  <div className="sub">
+                    Roll No.{' '}
+                    {current.current_player.roll_number}
+                  </div>
+
+                  <div
+                    className="notice"
+                    style={{ marginTop: '10px' }}
+                  >
+                    ✓ This is the only player
+                    that can be manually SOLD.
+                  </div>
+                </div>
+
+                <select
+                  className="select"
+                  style={{
+                    width: '100%',
+                    marginTop: '10px'
+                  }}
+                  value={manualSoldTeam}
+                  onChange={e =>
+                    setManualSoldTeam(e.target.value)
+                  }
+                >
+                  <option value="">
+                    Select Team
+                  </option>
+
+                  {TEAM_NAMES.map(name => (
+                    <option
+                      key={name}
+                      value={name}
+                    >
+                      {name} — {selectedBalance(name)} EP
+                    </option>
+                  ))}
+                </select>
+
+                <input
+                  className="field"
+                  style={{
+                    width: '100%',
+                    marginTop: '10px'
+                  }}
+                  type="number"
+                  min="3"
+                  step="1"
+                  placeholder="Sale points / EP"
+                  value={manualSoldPoints}
+                  onChange={e =>
+                    setManualSoldPoints(
+                      e.target.value
+                    )
+                  }
+                />
+
+                <div
+                  className="actions"
+                  style={{ marginTop: '12px' }}
+                >
+                  <button
+                    className="btn success"
+                    disabled={
+                      manualSelling ||
+                      !manualSoldTeam ||
+                      !manualSoldPoints ||
+                      !!auctionAnnouncement
+                    }
+                    onClick={
+                      manualSellCurrentPlayer
+                    }
+                  >
+                    {manualSelling
+                      ? 'Selling…'
+                      : '✓ CONFIRM SOLD'}
+                  </button>
+
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      setManualSoldOpen(false)
+                      setManualSoldTeam('')
+                      setManualSoldPoints('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="notice">
+                Manual SOLD is available only
+                when a player is currently
+                being auctioned.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  /* =========================================================
      AUCTION PAGE
   ========================================================= */
 
@@ -1527,49 +1949,7 @@ function App() {
                   </button>
                 </div>
 
-                {/* =================================================
-                    IMPORTANT FIX:
-                    PlayerManagement is now a TOP-LEVEL component.
-                    It is NOT defined inside App().
-                ================================================= */}
-
-                <PlayerManagement
-                  session={session}
-                  pool={pool}
-                  current={current}
-                  players={players}
-                  bids={bids}
-                  teamMap={teamMap}
-                  balances={balances}
-                  auctionAnnouncement={auctionAnnouncement}
-                  manualAddOpen={manualAddOpen}
-                  setManualAddOpen={setManualAddOpen}
-                  manualRoll={manualRoll}
-                  setManualRoll={setManualRoll}
-                  manualName={manualName}
-                  setManualName={setManualName}
-                  addingManual={addingManual}
-                  addManualPlayer={addManualPlayer}
-                  importOpen={importOpen}
-                  setImportOpen={setImportOpen}
-                  importing={importing}
-                  importFile={importFile}
-                  setImportFile={setImportFile}
-                  importPlayersFromCsv={importPlayersFromCsv}
-                  manualSoldOpen={manualSoldOpen}
-                  setManualSoldOpen={setManualSoldOpen}
-                  manualSoldTeam={manualSoldTeam}
-                  setManualSoldTeam={setManualSoldTeam}
-                  manualSoldPoints={manualSoldPoints}
-                  setManualSoldPoints={setManualSoldPoints}
-                  manualSelling={manualSelling}
-                  manualSellCurrentPlayer={
-                    manualSellCurrentPlayer
-                  }
-                  selectedBalance={selectedBalance}
-                  setRollOpen={setRollOpen}
-                  notify={notify}
-                />
+                <PlayerManagement />
 
                 {rollOpen && (
                   <div
@@ -1866,43 +2246,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          <PlayerManagement
-            session={session}
-            pool={pool}
-            current={current}
-            players={players}
-            bids={bids}
-            teamMap={teamMap}
-            balances={balances}
-            auctionAnnouncement={auctionAnnouncement}
-            manualAddOpen={manualAddOpen}
-            setManualAddOpen={setManualAddOpen}
-            manualRoll={manualRoll}
-            setManualRoll={setManualRoll}
-            manualName={manualName}
-            setManualName={setManualName}
-            addingManual={addingManual}
-            addManualPlayer={addManualPlayer}
-            importOpen={importOpen}
-            setImportOpen={setImportOpen}
-            importing={importing}
-            importFile={importFile}
-            setImportFile={setImportFile}
-            importPlayersFromCsv={importPlayersFromCsv}
-            manualSoldOpen={manualSoldOpen}
-            setManualSoldOpen={setManualSoldOpen}
-            manualSoldTeam={manualSoldTeam}
-            setManualSoldTeam={setManualSoldTeam}
-            manualSoldPoints={manualSoldPoints}
-            setManualSoldPoints={setManualSoldPoints}
-            manualSelling={manualSelling}
-            manualSellCurrentPlayer={
-              manualSellCurrentPlayer
-            }
-            selectedBalance={selectedBalance}
-            setRollOpen={setRollOpen}
-            notify={notify}
-          />
+          <PlayerManagement />
         )}
 
         <div
@@ -2216,385 +2560,6 @@ function App() {
       {toast && (
         <div className="toast">
           {toast}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/* =========================================================
-   PLAYER MANAGEMENT
-   IMPORTANT:
-   THIS COMPONENT MUST STAY OUTSIDE APP().
-   DO NOT MOVE IT INSIDE APP AGAIN.
-========================================================= */
-
-function PlayerManagement({
-  session,
-  pool,
-  current,
-  players,
-  bids,
-  teamMap,
-  balances,
-  auctionAnnouncement,
-
-  manualAddOpen,
-  setManualAddOpen,
-  manualRoll,
-  setManualRoll,
-  manualName,
-  setManualName,
-  addingManual,
-  addManualPlayer,
-
-  importOpen,
-  setImportOpen,
-  importing,
-  importFile,
-  setImportFile,
-  importPlayersFromCsv,
-
-  manualSoldOpen,
-  setManualSoldOpen,
-  manualSoldTeam,
-  setManualSoldTeam,
-  manualSoldPoints,
-  setManualSoldPoints,
-  manualSelling,
-  manualSellCurrentPlayer,
-
-  selectedBalance,
-  setRollOpen,
-  notify
-}) {
-  const hasLivePlayer =
-    !!current?.current_player_id
-
-  return (
-    <div
-      className="card"
-      style={{ marginTop: '16px' }}
-    >
-      <div className="eyebrow">
-        PLAYER MANAGEMENT
-      </div>
-
-      <div className="teamPool">
-        {poolLabel(pool)}
-      </div>
-
-      <div
-        className="actions"
-        style={{ marginTop: '12px' }}
-      >
-        <button
-          className="btn primary"
-          onClick={() => {
-            setManualAddOpen(!manualAddOpen)
-            setImportOpen(false)
-            setManualSoldOpen(false)
-          }}
-        >
-          ➕ Add Player Manually
-        </button>
-
-        <button
-          className="btn"
-          onClick={() => {
-            setImportOpen(!importOpen)
-            setManualAddOpen(false)
-            setManualSoldOpen(false)
-          }}
-        >
-          📥 Import Players
-        </button>
-
-        <button
-          className="btn"
-          disabled={
-            !hasLivePlayer ||
-            !!auctionAnnouncement
-          }
-          onClick={() => {
-            if (!hasLivePlayer) {
-              notify(
-                'Manual SOLD is available only for the current bidding player'
-              )
-              return
-            }
-
-            setManualSoldOpen(!manualSoldOpen)
-            setManualAddOpen(false)
-            setImportOpen(false)
-
-            if (!manualSoldOpen) {
-              setManualSoldTeam('')
-              setManualSoldPoints('')
-            }
-          }}
-        >
-          💰 Manual SOLD
-        </button>
-      </div>
-
-      {manualAddOpen && (
-        <div style={{ marginTop: '14px' }}>
-          <div className="eyebrow">
-            MANUAL ENTRY
-          </div>
-
-          <div
-            style={{
-              display: 'flex',
-              gap: '10px',
-              marginTop: '10px',
-              flexWrap: 'wrap'
-            }}
-          >
-            <input
-              className="field"
-              style={{
-                flex: '1',
-                minWidth: '150px'
-              }}
-              inputMode="numeric"
-              placeholder="Roll number"
-              value={manualRoll}
-              onChange={e =>
-                setManualRoll(e.target.value)
-              }
-            />
-
-            <input
-              className="field"
-              style={{
-                flex: '2',
-                minWidth: '200px'
-              }}
-              placeholder="Player name"
-              value={manualName}
-              onChange={e =>
-                setManualName(e.target.value)
-              }
-            />
-
-            <button
-              className="btn primary"
-              disabled={
-                addingManual ||
-                !manualRoll.trim() ||
-                !manualName.trim()
-              }
-              onClick={addManualPlayer}
-            >
-              {addingManual
-                ? 'Adding…'
-                : 'Add Player'}
-            </button>
-          </div>
-
-          <div
-            className="notice"
-            style={{ marginTop: '10px' }}
-          >
-            Player will be added to{' '}
-            <b>{poolLabel(pool)}</b>.
-          </div>
-        </div>
-      )}
-
-      {importOpen && (
-        <div style={{ marginTop: '14px' }}>
-          <div className="eyebrow">
-            CSV IMPORT
-          </div>
-
-          <div className="notice">
-            <b>CSV format:</b>
-            <br />
-            roll_number,name
-            <br />
-            101,John
-            <br />
-            102,David
-            <br />
-            <br />
-            Or:
-            <br />
-            <b>
-              batch,gender,roll_number,name
-            </b>
-            <br />
-            <br />
-            If batch/gender are missing,
-            the selected pool is used.
-          </div>
-
-          <input
-            className="field"
-            style={{ marginTop: '10px' }}
-            type="file"
-            accept=".csv,text/csv"
-            onChange={e =>
-              setImportFile(
-                e.target.files?.[0] || null
-              )
-            }
-          />
-
-          <div
-            className="actions"
-            style={{ marginTop: '10px' }}
-          >
-            <button
-              className="btn primary"
-              disabled={
-                importing || !importFile
-              }
-              onClick={importPlayersFromCsv}
-            >
-              {importing
-                ? 'Importing…'
-                : 'Import CSV'}
-            </button>
-
-            <button
-              className="btn"
-              onClick={() => {
-                setImportOpen(false)
-                setImportFile(null)
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {manualSoldOpen && (
-        <div style={{ marginTop: '14px' }}>
-          <div className="eyebrow">
-            MANUAL SOLD
-          </div>
-
-          {current?.current_player ? (
-            <>
-              <div
-                className="card"
-                style={{ marginTop: '10px' }}
-              >
-                <div className="eyebrow">
-                  CURRENT BIDDING PLAYER
-                </div>
-
-                <div
-                  className="playername"
-                  style={{
-                    fontSize: '28px',
-                    marginTop: '5px'
-                  }}
-                >
-                  {current.current_player.name}
-                </div>
-
-                <div className="sub">
-                  Roll No.{' '}
-                  {current.current_player.roll_number}
-                </div>
-
-                <div
-                  className="notice"
-                  style={{ marginTop: '10px' }}
-                >
-                  ✓ This is the only player
-                  that can be manually SOLD.
-                </div>
-              </div>
-
-              <select
-                className="select"
-                style={{
-                  width: '100%',
-                  marginTop: '10px'
-                }}
-                value={manualSoldTeam}
-                onChange={e =>
-                  setManualSoldTeam(e.target.value)
-                }
-              >
-                <option value="">
-                  Select Team
-                </option>
-
-                {TEAM_NAMES.map(name => (
-                  <option
-                    key={name}
-                    value={name}
-                  >
-                    {name} — {selectedBalance(name)} EP
-                  </option>
-                ))}
-              </select>
-
-              <input
-                className="field"
-                style={{
-                  width: '100%',
-                  marginTop: '10px'
-                }}
-                type="number"
-                min="3"
-                step="1"
-                placeholder="Sale points / EP"
-                value={manualSoldPoints}
-                onChange={e =>
-                  setManualSoldPoints(
-                    e.target.value
-                  )
-                }
-              />
-
-              <div
-                className="actions"
-                style={{ marginTop: '12px' }}
-              >
-                <button
-                  className="btn success"
-                  disabled={
-                    manualSelling ||
-                    !manualSoldTeam ||
-                    !manualSoldPoints ||
-                    !!auctionAnnouncement
-                  }
-                  onClick={
-                    manualSellCurrentPlayer
-                  }
-                >
-                  {manualSelling
-                    ? 'Selling…'
-                    : '✓ CONFIRM SOLD'}
-                </button>
-
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setManualSoldOpen(false)
-                    setManualSoldTeam('')
-                    setManualSoldPoints('')
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="notice">
-              Manual SOLD is available only
-              when a player is currently
-              being auctioned.
-            </div>
-          )}
         </div>
       )}
     </div>
