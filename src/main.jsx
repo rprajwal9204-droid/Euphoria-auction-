@@ -1949,7 +1949,12 @@ function App() {
                   </button>
                 </div>
 
-                <PlayerManagement />
+                {/* KEYBOARD FIX:
+                    PlayerManagement is intentionally called as
+                    a render function instead of <PlayerManagement />.
+                    This prevents the input from being unmounted
+                    after every keystroke. */}
+                {PlayerManagement()}
 
                 {rollOpen && (
                   <div
@@ -2246,7 +2251,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          <PlayerManagement />
+          {PlayerManagement()}
         )}
 
         <div
