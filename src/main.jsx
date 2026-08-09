@@ -55,12 +55,6 @@ function App() {
   const [manualSoldPoints, setManualSoldPoints] = useState('')
   const [manualSelling, setManualSelling] = useState(false)
 
-  /*
-   * =========================================================
-   * AUCTION RESULT ANNOUNCEMENT
-   * =========================================================
-   */
-
   const [auctionAnnouncement, setAuctionAnnouncement] =
     useState(null)
 
@@ -83,10 +77,6 @@ function App() {
     () => Object.fromEntries(teams.map(t => [t.id, t])),
     [teams]
   )
-
-  /* =========================================================
-     AUTH
-  ========================================================= */
 
   useEffect(() => {
     if (!supabaseConfigured) {
@@ -124,10 +114,6 @@ function App() {
       sub.subscription.unsubscribe()
     }
   }, [])
-
-  /* =========================================================
-     INITIAL LOAD
-  ========================================================= */
 
   useEffect(() => {
     loadBase()
@@ -313,10 +299,6 @@ function App() {
     }, 3500)
   }
 
-  /* =========================================================
-     LOGIN
-  ========================================================= */
-
   async function login(email, password) {
     const { data, error } =
       await supabase.auth.signInWithPassword({
@@ -342,10 +324,6 @@ function App() {
     setSession(null)
     setMode('public')
   }
-
-  /* =========================================================
-     PLAYER CREATION
-  ========================================================= */
 
   async function addManualPlayer() {
     if (!session) {
@@ -431,10 +409,6 @@ function App() {
       setAddingManual(false)
     }
   }
-
-  /* =========================================================
-     CSV
-  ========================================================= */
 
   function normalizeCsvHeader(value) {
     return String(value || '')
@@ -715,10 +689,6 @@ function App() {
     }
   }
 
-  /* =========================================================
-     AUCTION
-  ========================================================= */
-
   async function startPlayerByRoll() {
     if (!session) {
       setLoginOpen(true)
@@ -820,12 +790,6 @@ function App() {
 
     const soldPlayer = current.current_player
 
-    /*
-     * Resolve the team robustly.
-     *
-     * Sometimes the nested leader_team relation may not be
-     * populated. In that case use leader_team_id -> teams.
-     */
     const soldTeam =
       current.leader_team ||
       teamById[current.leader_team_id] ||
@@ -900,10 +864,6 @@ function App() {
 
     await loadPool()
   }
-
-  /* =========================================================
-     MANUAL SOLD
-  ========================================================= */
 
   async function manualSellCurrentPlayer() {
     if (!session) {
@@ -988,10 +948,6 @@ function App() {
             current.current_player_id
         )
 
-      /*
-       * Remove any existing bids first so Manual SOLD starts
-       * from a clean state.
-       */
       for (const existing of existingBids) {
         const { error } =
           await supabase.rpc(
@@ -1008,20 +964,6 @@ function App() {
         }
       }
 
-      /*
-       * IMPORTANT:
-       *
-       * manual_bid requires the FIRST bid to be exactly 3 EP.
-       *
-       * Therefore Manual SOLD must first create the valid
-       * opening 3 EP bid.
-       *
-       * If the requested sale price is greater than 3 EP,
-       * we then create the requested final bid.
-       *
-       * This fixes:
-       * "first bid must be exactly 3"
-       */
       const openingBid =
         await supabase.rpc(
           'manual_bid',
@@ -1038,10 +980,6 @@ function App() {
         return
       }
 
-      /*
-       * If Manual SOLD price is above 3 EP, create the
-       * final bid at the requested sale amount.
-       */
       if (amount > 3) {
         const finalBid =
           await supabase.rpc(
@@ -1060,10 +998,6 @@ function App() {
         }
       }
 
-      /*
-       * Now the selected team is the current leader and the
-       * normal SOLD RPC can complete the sale.
-       */
       const saleResult =
         await supabase.rpc(
           'sell_current_player',
@@ -1105,10 +1039,6 @@ function App() {
       setManualSelling(false)
     }
   }
-
-  /* =========================================================
-     BID MANAGEMENT
-  ========================================================= */
 
   async function deleteBid(id) {
     if (!session) {
@@ -1284,10 +1214,6 @@ function App() {
     }
   }
 
-  /* =========================================================
-     HELPERS
-  ========================================================= */
-
   const selectedBalance = name =>
     balances.find(
       x =>
@@ -1326,13 +1252,6 @@ function App() {
           )
       : []
 
-  /*
-   * Current bidder = team belonging to the latest bid.
-   *
-   * This is more reliable than relying only on
-   * current.leader_team because the realtime state can
-   * briefly arrive before its nested relation.
-   */
   const currentBidder =
     currentPlayerBids.length > 0
       ? (
@@ -1384,10 +1303,6 @@ function App() {
     setSelectedTeam(teamName)
     setPage('teams')
   }
-
-  /* =========================================================
-     PLAYER MANAGEMENT
-  ========================================================= */
 
   function PlayerManagement() {
     const hasLivePlayer =
@@ -1723,10 +1638,6 @@ function App() {
     )
   }
 
-  /* =========================================================
-     AUCTION PAGE
-  ========================================================= */
-
   function auction() {
     const c = current
 
@@ -1796,10 +1707,6 @@ function App() {
                 {c?.current_bid ?? 3}
                 <small> EP</small>
               </div>
-
-              {/* =================================================
-                  CURRENT BIDDER
-                  ================================================= */}
 
               <div
                 style={{
@@ -1908,7 +1815,7 @@ function App() {
                   </button>
                 </div>
 
-                <PlayerManagement />
+                {PlayerManagement()}
 
                 {rollOpen && (
                   <div
@@ -2121,10 +2028,6 @@ function App() {
     )
   }
 
-  /* =========================================================
-     TEAMS
-  ========================================================= */
-
   function teamsPage() {
     if (selectedTeam) {
       return (
@@ -2191,10 +2094,6 @@ function App() {
     )
   }
 
-  /* =========================================================
-     PLAYERS
-  ========================================================= */
-
   function playersPage() {
     return (
       <>
@@ -2205,7 +2104,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          <PlayerManagement />
+          {PlayerManagement()}
         )}
 
         <div
@@ -2272,10 +2171,6 @@ function App() {
       </>
     )
   }
-
-  /* =========================================================
-     HISTORY
-  ========================================================= */
 
   function historyPage() {
     return (
@@ -2349,10 +2244,6 @@ function App() {
     )
   }
 
-  /* =========================================================
-     POOLS
-  ========================================================= */
-
   function poolsPage() {
     return (
       <>
@@ -2383,10 +2274,6 @@ function App() {
       </>
     )
   }
-
-  /* =========================================================
-     RENDER
-  ========================================================= */
 
   if (loading) {
     return (
@@ -2525,10 +2412,6 @@ function App() {
   )
 }
 
-/* =========================================================
-   AUCTION ANNOUNCEMENT
-========================================================= */
-
 function AuctionAnnouncement({
   announcement
 }) {
@@ -2659,10 +2542,6 @@ function AuctionAnnouncement({
   )
 }
 
-/* =========================================================
-   TEAM DETAILS
-========================================================= */
-
 function TeamDetails({
   selectedTeam,
   pool,
@@ -2775,245 +2654,4 @@ function TeamDetails({
               </tr>
             </thead>
 
-            <tbody>
-              {displayedPlayers.map(x => (
-                <tr key={x.id}>
-                  {viewMode === 'all' && (
-                    <td>
-                      {x.pool
-                        ? `${x.pool.batch_year} • ${x.pool.gender}`
-                        : '—'}
-                    </td>
-                  )}
-
-                  <td>
-                    {x.player?.roll_number} —{' '}
-                    {x.player?.name}
-                  </td>
-
-                  <td>
-                    {x.final_price} EP
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </>
-  )
-}
-
-/* =========================================================
-   TEAM CARD
-========================================================= */
-
-function TeamCard({
-  name,
-  balance,
-  onClick
-}) {
-  return (
-    <div
-      className="team"
-      onClick={onClick}
-      style={{ cursor: 'pointer' }}
-    >
-      <div className="teamtop">
-        <span
-          className={`teamname ${TEAM_COLORS[name]}`}
-        >
-          {name}
-        </span>
-
-        <span className="balance">
-          {balance} EP
-        </span>
-      </div>
-
-      <div
-        className={`bar ${TEAM_COLORS[name]}`}
-      >
-        <i
-          style={{
-            width: `${Math.max(
-              0,
-              Math.min(
-                100,
-                (balance / 150) * 100
-              )
-            )}%`
-          }}
-        />
-      </div>
-
-      <small
-        style={{
-          display: 'block',
-          marginTop: '6px',
-          opacity: 0.7
-        }}
-      >
-        Tap to view players →
-      </small>
-    </div>
-  )
-}
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-function Header({
-  eyebrow,
-  title,
-  sub
-}) {
-  return (
-    <div className="sectionhead">
-      <div>
-        <div className="eyebrow">
-          {eyebrow}
-        </div>
-
-        <div className="title">
-          {title}
-        </div>
-
-        <div className="sub">
-          {sub}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* =========================================================
-   NAV
-========================================================= */
-
-function Nav({
-  active,
-  onClick,
-  children
-}) {
-  return (
-    <button
-      className={active ? 'active' : ''}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  )
-}
-
-/* =========================================================
-   POOL LABEL
-========================================================= */
-
-function poolLabel(p) {
-  return p
-    ? `${p.batch_year} • ${p.gender}`
-    : '—'
-}
-
-/* =========================================================
-   LOGIN
-========================================================= */
-
-function Login({
-  onLogin,
-  onClose
-}) {
-  const [email, setEmail] =
-    useState('')
-
-  const [password, setPassword] =
-    useState('')
-
-  return (
-    <div className="modal">
-      <div className="modalCard">
-        <div className="title">
-          Admin Login
-        </div>
-
-        <div className="sub">
-          Only authenticated admins
-          can run the auction.
-        </div>
-
-        <input
-          className="field"
-          placeholder="Admin email"
-          value={email}
-          onChange={e =>
-            setEmail(e.target.value)
-          }
-        />
-
-        <input
-          className="field"
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={e =>
-            setPassword(e.target.value)
-          }
-        />
-
-        <div className="actions">
-          <button
-            className="btn"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-
-          <button
-            className="btn primary"
-            onClick={() =>
-              onLogin(email, password)
-            }
-          >
-            Login
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* =========================================================
-   SETUP
-========================================================= */
-
-function SetupScreen() {
-  return (
-    <div className="loading">
-      <div className="card setup">
-        <div className="title">
-          Euphoria is ready for Supabase
-        </div>
-
-        <p className="sub">
-          Add VITE_SUPABASE_URL and
-          VITE_SUPABASE_ANON_KEY to
-          your Vercel environment
-          variables, run the supplied
-          SQL in Supabase, then redeploy.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-/* =========================================================
-   ROOT
-========================================================= */
-
-createRoot(
-  document.getElementById('root')
-).render(
-  <App />
-)
+           
