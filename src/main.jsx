@@ -321,15 +321,6 @@ function App() {
 
   /* =========================================================
      PLAYER CREATION
-     
-     IMPORTANT:
-     NEVER directly insert into public.players.
-     
-     Both manual entry and CSV use:
-     
-       import_players(p_players jsonb)
-     
-     This avoids the players table RLS error.
   ========================================================= */
 
   async function addManualPlayer() {
@@ -367,11 +358,6 @@ function App() {
     setAddingManual(true)
 
     try {
-      /*
-       * IMPORTANT:
-       * Use the existing SECURITY DEFINER RPC.
-       * Do NOT use .from('players').insert().
-       */
       const { data, error } =
         await supabase.rpc(
           'import_players',
@@ -627,21 +613,20 @@ function App() {
           continue
         }
 
-        const normalizedRoll =
-          roll.toLowerCase()
-
         if (
           batch === String(pool.batch_year) &&
           gender.toLowerCase() ===
             String(pool.gender).toLowerCase() &&
-          existingRolls.has(normalizedRoll)
+          existingRolls.has(
+            roll.toLowerCase()
+          )
         ) {
           duplicateCount++
           continue
         }
 
         const key =
-          `${batch}|${gender.toLowerCase()}|${normalizedRoll}`
+          `${batch}|${gender.toLowerCase()}|${roll.toLowerCase()}`
 
         if (seen.has(key)) {
           duplicateCount++
@@ -665,10 +650,6 @@ function App() {
         return
       }
 
-      /*
-       * CSV also goes through the same RPC.
-       * No direct players INSERT.
-       */
       const { data, error } =
         await supabase.rpc(
           'import_players',
@@ -929,6 +910,11 @@ function App() {
     setManualSelling(true)
 
     try {
+      /*
+       * Remove the current player's existing bids.
+       * This prevents the old winning bid from interfering
+       * with the manually selected team/price.
+       */
       const existingBids =
         bids.filter(
           b =>
@@ -952,6 +938,10 @@ function App() {
         }
       }
 
+      /*
+       * Create exactly one bid representing
+       * the manually selected sale.
+       */
       const bidResult =
         await supabase.rpc(
           'manual_bid',
@@ -968,6 +958,10 @@ function App() {
         return
       }
 
+      /*
+       * Sell the current player using the normal
+       * auction sale RPC.
+       */
       const saleResult =
         await supabase.rpc(
           'sell_current_player',
@@ -982,12 +976,16 @@ function App() {
         return
       }
 
+      const soldTeamName = manualSoldTeam
+      const soldAmount = amount
+      const soldPlayerName = player.name
+
       setManualSoldTeam('')
       setManualSoldPoints('')
       setManualSoldOpen(false)
 
       notify(
-        `${player.name} SOLD to ${manualSoldTeam} for ${amount} EP`
+        `${soldPlayerName} SOLD to ${soldTeamName} for ${soldAmount} EP`
       )
 
       await loadPool()
@@ -1254,9 +1252,26 @@ function App() {
 
   /* =========================================================
      PLAYER MANAGEMENT
+     
+     IMPORTANT FIX:
+     
+     This is deliberately a NORMAL FUNCTION and NOT a React
+     component.
+     
+     DO NOT change this to:
+     
+       function PlayerManagement() { ... }
+     
+     and then render:
+     
+       <PlayerManagement />
+     
+     Doing that inside App causes the component to be
+     remounted whenever App state changes, which makes mobile
+     keyboard/input focus disappear after the first character.
   ========================================================= */
 
-  function PlayerManagement() {
+  function playerManagement() {
     const hasLivePlayer =
       !!current?.current_player_id
 
@@ -1310,11 +1325,14 @@ function App() {
                 return
               }
 
-              setManualSoldOpen(!manualSoldOpen)
+              const opening =
+                !manualSoldOpen
+
+              setManualSoldOpen(opening)
               setManualAddOpen(false)
               setImportOpen(false)
 
-              if (!manualSoldOpen) {
+              if (opening) {
                 setManualSoldTeam('')
                 setManualSoldPoints('')
               }
@@ -1506,7 +1524,9 @@ function App() {
                   }}
                   value={manualSoldTeam}
                   onChange={e =>
-                    setManualSoldTeam(e.target.value)
+                    setManualSoldTeam(
+                      e.target.value
+                    )
                   }
                 >
                   <option value="">
@@ -1532,6 +1552,7 @@ function App() {
                   type="number"
                   min="3"
                   step="1"
+                  inputMode="numeric"
                   placeholder="Sale points / EP"
                   value={manualSoldPoints}
                   onChange={e =>
@@ -1563,6 +1584,7 @@ function App() {
 
                   <button
                     className="btn"
+                    disabled={manualSelling}
                     onClick={() => {
                       setManualSoldOpen(false)
                       setManualSoldTeam('')
@@ -1732,7 +1754,13 @@ function App() {
                   </button>
                 </div>
 
-                <PlayerManagement />
+                {/*
+                 * IMPORTANT:
+                 * Normal function call, NOT <PlayerManagement />.
+                 *
+                 * This preserves input focus while typing.
+                 */}
+                {playerManagement()}
 
                 {rollOpen && (
                   <div
@@ -1772,6 +1800,7 @@ function App() {
                         }
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
+                            e.preventDefault()
                             startPlayerByRoll()
                           }
                         }}
@@ -2018,7 +2047,7 @@ function App() {
         />
 
         {mode === 'admin' && (
-          <PlayerManagement />
+          playerManagement()
         )}
 
         <div
@@ -2625,6 +2654,7 @@ function Login({
         <input
           className="field"
           placeholder="Admin email"
+          autoComplete="email"
           value={email}
           onChange={e =>
             setEmail(e.target.value)
@@ -2635,6 +2665,7 @@ function Login({
           className="field"
           type="password"
           placeholder="Password"
+          autoComplete="current-password"
           value={password}
           onChange={e =>
             setPassword(e.target.value)
