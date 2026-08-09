@@ -301,14 +301,6 @@ function App() {
     }
   }
 
-  /*
-   * NORMAL BID
-   *
-   * IMPORTANT:
-   * The first bid is displayed as 3 EP.
-   * Your Supabase RPC must also allow 3 EP as
-   * the first bid.
-   */
   async function bid(teamName) {
     if (!session) {
       setLoginOpen(true)
@@ -523,9 +515,6 @@ function App() {
     }
   }
 
-  /*
-   * MANUAL BID
-   */
   async function manualBid() {
     if (!session) {
       setLoginOpen(true)
@@ -567,9 +556,6 @@ function App() {
     await loadPool()
   }
 
-  /*
-   * MANUAL SALE
-   */
   async function manualSale() {
     if (!session) {
       setLoginOpen(true)
@@ -622,10 +608,6 @@ function App() {
   const selectedBalance = name =>
     balances.find(x => x.team_id === teamMap[name]?.id)?.remaining_ep ?? 150
 
-  /*
-   * FIRST BID = 3 EP.
-   * After a 3 EP opening bid, next normal bid = 4 EP.
-   */
   const nextBid = b => {
     if (b === 3 && !current?.leader_team_id) return 3
     if (b < 10) return b + 1
@@ -644,6 +626,28 @@ function App() {
           return d !== 0 ? d : Number(a.id) - Number(b.id)
         })
     : []
+
+  /*
+   * =========================================================
+   * PREVIOUS PLAYER
+   * =========================================================
+   *
+   * Find the newest completed result for this pool.
+   *
+   * Only SOLD and UNSOLD results are considered.
+   *
+   * If the current player has already been removed from
+   * auction_states after being completed, the latest result
+   * is the previous player.
+   *
+   * If a result somehow still points to the current player,
+   * skip it so the current player is never shown as previous.
+   */
+  const previousPlayer = history.find(
+    x =>
+      (x.status === 'SOLD' || x.status === 'UNSOLD') &&
+      x.player_id !== current?.current_player_id
+  )
 
   function currentPoolTeamPlayers(teamName) {
     return history.filter(
@@ -711,6 +715,7 @@ function App() {
 
         <div className="grid">
           <section>
+            {/* CURRENT PLAYER */}
             <div className="card player">
               <div className="roll">
                 ROLL NO. {c?.current_player?.roll_number || '—'}
@@ -739,6 +744,85 @@ function App() {
                   : 'OPEN • BASE 3 EP'}
               </div>
             </div>
+
+            {/* =================================================
+                PREVIOUS PLAYER
+                ================================================= */}
+            {previousPlayer && (
+              <div
+                className="card"
+                style={{
+                  marginTop: '16px',
+                  border: '1px solid rgba(255,255,255,.12)'
+                }}
+              >
+                <div className="eyebrow">
+                  PREVIOUS PLAYER
+                </div>
+
+                <div
+                  style={{
+                    marginTop: '8px',
+                    fontSize: '22px',
+                    fontWeight: '800'
+                  }}
+                >
+                  {previousPlayer.player?.name || 'Unknown Player'}
+                </div>
+
+                <div
+                  className="sub"
+                  style={{ marginTop: '4px' }}
+                >
+                  ROLL NO. {previousPlayer.player?.roll_number || '—'}
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                    marginTop: '14px',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: '800',
+                      fontSize: '18px'
+                    }}
+                  >
+                    {previousPlayer.status === 'SOLD'
+                      ? `🏆 ${previousPlayer.team?.name || 'Unknown Team'}`
+                      : '🔴 UNSOLD'}
+                  </div>
+
+                  <div
+                    style={{
+                      fontWeight: '800',
+                      fontSize: '18px'
+                    }}
+                  >
+                    {previousPlayer.status === 'SOLD'
+                      ? `${previousPlayer.final_price ?? 0} EP`
+                      : '—'}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    marginTop: '10px',
+                    fontSize: '13px',
+                    opacity: 0.65
+                  }}
+                >
+                  {previousPlayer.status === 'SOLD'
+                    ? 'Player sold successfully'
+                    : 'Player remained unsold'}
+                </div>
+              </div>
+            )}
 
             {mode === 'admin' && (
               <>
@@ -794,7 +878,6 @@ function App() {
                   </button>
                 </div>
 
-                {/* MANUAL CONTROLS */}
                 {c?.current_player && (
                   <div
                     className="card"
@@ -845,7 +928,6 @@ function App() {
                   </div>
                 )}
 
-                {/* BID HISTORY */}
                 {c?.current_player && (
                   <div
                     className="card"
@@ -1446,7 +1528,6 @@ function App() {
         </main>
       </div>
 
-      {/* MANUAL BID MODAL */}
       {manualBidOpen && (
         <div className="modal">
           <div className="modalCard">
@@ -1504,7 +1585,6 @@ function App() {
         </div>
       )}
 
-      {/* MANUAL SALE MODAL */}
       {manualSaleOpen && (
         <div className="modal">
           <div className="modalCard">
