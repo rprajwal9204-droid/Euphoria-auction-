@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import './styles.css'
@@ -43,6 +43,10 @@ function App() {
   const [deletingBid, setDeletingBid] = useState(null)
   const [undoingSale, setUndoingSale] = useState(null)
   const [deletingPlayer, setDeletingPlayer] = useState(null)
+
+  const [importingPlayers, setImportingPlayers] = useState(false)
+
+  const fileInputRef = useRef(null)
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
@@ -231,12 +235,7 @@ function App() {
     if (hist.error) notify(hist.error.message)
     if (bidData.error) notify(bidData.error.message)
 
-    if (state.data) {
-      setCurrent(state.data)
-    } else {
-      setCurrent(null)
-    }
-
+    setCurrent(state.data || null)
     setBalances(bal.data || [])
     setPlayers(ps.data || [])
     setHistory(hist.data || [])
@@ -278,6 +277,290 @@ function App() {
   async function logout() {
     await supabase.auth.signOut()
     setMode('public')
+  }
+
+  /*
+   * =========================================================
+   * CSV IMPORT
+   * =========================================================
+   *
+   * Expected Google Sheet columns:
+   *
+   * Roll Number | Name
+   *
+   * Also accepts:
+   *
+   * roll_number | name
+   * roll | name
+   * Roll No | Player Name
+   *
+   * The import is always tied to the CURRENT selected pool.
+   */
+
+  function cleanCsvValue(value) {
+    if (value === null || value === undefined) {
+      return ''
+    }
+
+    return String(value)
+      .replace(/^\uFEFF/, '')
+      .trim()
+  }
+
+  function parseCSV(text) {
+    const rows = []
+    let row = []
+    let value = ''
+    let insideQuotes = false
+
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i]
+      const next = text[i + 1]
+
+      if (char === '"') {
+        if (insideQuotes && next === '"') {
+          value += '"'
+          i++
+        } else {
+          insideQuotes = !insideQuotes
+        }
+      } else if (char === ',' && !insideQuotes) {
+        row.push(value)
+        value = ''
+      } else if (
+        (char === '\n' || char === '\r') &&
+        !insideQuotes
+      ) {
+        if (char === '\r' && next === '\n') {
+          i++
+        }
+
+        row.push(value)
+        value = ''
+
+        if (row.some(cell => cleanCsvValue(cell) !== '')) {
+          rows.push(row)
+        }
+
+        row = []
+      } else {
+        value += char
+      }
+    }
+
+    if (value !== '' || row.length > 0) {
+      row.push(value)
+
+      if (row.some(cell => cleanCsvValue(cell) !== '')) {
+        rows.push(row)
+      }
+    }
+
+    return rows
+  }
+
+  function normaliseHeader(header) {
+    return cleanCsvValue(header)
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '')
+  }
+
+  function findColumn(headers, possibleNames) {
+    for (const name of possibleNames) {
+      const index = headers.findIndex(
+        h => normaliseHeader(h) === normaliseHeader(name)
+      )
+
+      if (index !== -1) {
+        return index
+      }
+    }
+
+    return -1
+  }
+
+  async function handlePlayerCSV(event) {
+    const file = event.target.files?.[0]
+
+    if (!file) return
+
+    if (!session) {
+      setLoginOpen(true)
+      event.target.value = ''
+      return
+    }
+
+    if (!pool) {
+      notify('Select a pool first')
+      event.target.value = ''
+      return
+    }
+
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      notify('Please export your Google Sheet as CSV first')
+      event.target.value = ''
+      return
+    }
+
+    setImportingPlayers(true)
+
+    try {
+      const text = await file.text()
+      const rows = parseCSV(text)
+
+      if (!rows.length) {
+        throw new Error('The CSV file is empty')
+      }
+
+      const headers = rows[0]
+
+      const rollIndex = findColumn(headers, [
+        'roll_number',
+        'roll number',
+        'roll no',
+        'rollno',
+        'roll',
+        'roll_number.'
+      ])
+
+      const nameIndex = findColumn(headers, [
+        'name',
+        'player name',
+        'player_name',
+        'playername'
+      ])
+
+      if (rollIndex === -1) {
+        throw new Error(
+          'Could not find Roll Number column'
+        )
+      }
+
+      if (nameIndex === -1) {
+        throw new Error(
+          'Could not find Name column'
+        )
+      }
+
+      const imported = []
+      const seenRolls = new Set()
+
+      let duplicateRows = 0
+      let emptyRows = 0
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i]
+
+        const roll = cleanCsvValue(row[rollIndex])
+        const name = cleanCsvValue(row[nameIndex])
+
+        if (!roll || !name) {
+          emptyRows++
+          continue
+        }
+
+        /*
+         * Duplicate protection INSIDE the CSV itself.
+         *
+         * If Google Sheet accidentally contains:
+         *
+         * 101 John
+         * 101 John
+         *
+         * only one is sent to Supabase.
+         */
+        const rollKey = roll.toLowerCase()
+
+        if (seenRolls.has(rollKey)) {
+          duplicateRows++
+          continue
+        }
+
+        seenRolls.add(rollKey)
+
+        imported.push({
+          roll_number: roll,
+          name
+        })
+      }
+
+      if (!imported.length) {
+        throw new Error(
+          'No valid players were found in the CSV'
+        )
+      }
+
+      /*
+       * Send the complete list to the secure Supabase RPC.
+       *
+       * The database function:
+       *
+       * - checks admin access
+       * - checks pool
+       * - finds existing roll numbers
+       * - updates existing unsold players
+       * - keeps SOLD players safe
+       * - inserts genuinely new players
+       */
+      const { data, error } = await supabase.rpc(
+        'import_players',
+        {
+          p_pool_id: pool.id,
+          p_players: imported
+        }
+      )
+
+      if (error) {
+        throw new Error(error.message)
+      }
+
+      await loadPool()
+
+      const added = Number(data || 0)
+
+      notify(
+        `Import complete • ${added} new player${
+          added === 1 ? '' : 's'
+        } added`
+      )
+
+      if (duplicateRows > 0 || emptyRows > 0) {
+        setTimeout(() => {
+          notify(
+            `${duplicateRows} duplicate row${
+              duplicateRows === 1 ? '' : 's'
+            } skipped • ${emptyRows} empty row${
+              emptyRows === 1 ? '' : 's'
+            } skipped`
+          )
+        }, 3800)
+      }
+    } catch (error) {
+      notify(
+        error?.message ||
+          'Player import failed'
+      )
+    } finally {
+      setImportingPlayers(false)
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  function openImportPicker() {
+    if (!session) {
+      setLoginOpen(true)
+      return
+    }
+
+    if (!pool) {
+      notify('Select a pool first')
+      return
+    }
+
+    fileInputRef.current?.click()
   }
 
   async function startPlayerByRoll() {
@@ -330,16 +613,9 @@ function App() {
   /*
    * =========================================================
    * BIDDING
-   *
-   * FIRST BID = 3 EP
-   *
-   * We deliberately DO NOT use current_bid === 3
-   * to determine whether the first bid has happened.
-   *
-   * Instead, we check whether this player already has
-   * any bids.
    * =========================================================
    */
+
   async function bid(teamName) {
     const team = teamMap[teamName]
 
@@ -353,16 +629,10 @@ function App() {
         current.current_player_id
     )
 
-    /*
-     * No previous bids = FIRST BID = 3 EP
-     * Previous bids exist = normal next bid
-     */
     const amount =
       playerBids.length === 0
         ? 3
-        : nextBid(
-            current.current_bid
-          )
+        : nextBid(current.current_bid)
 
     const { error } = await supabase.rpc(
       'manual_bid',
@@ -604,23 +874,6 @@ function App() {
         teamMap[name]?.id
     )?.remaining_ep ?? 150
 
-  /*
-   * BID INCREMENT
-   *
-   * This function is ONLY used AFTER the first bid.
-   *
-   * First bid:
-   *     3 EP
-   *
-   * Then:
-   *     4,5,6,7,8,9
-   *
-   * Then:
-   *     10,12,14...
-   *
-   * Then:
-   *     20,25,30...
-   */
   const nextBid = b => {
     const value = Number(b)
 
@@ -639,13 +892,6 @@ function App() {
     return value + 5
   }
 
-  /*
-   * Calculate the actual amount displayed on the
-   * team buttons.
-   *
-   * NO BIDS = 3
-   * HAS BIDS = next increment
-   */
   const currentPlayerBids =
     current?.current_player_id
       ? bids
@@ -1191,13 +1437,84 @@ function App() {
   function playersPage() {
     return (
       <>
-        <Header
-          eyebrow="PLAYERS"
-          title="PLAYERS"
-          sub={`Players in ${poolLabel(pool)}`}
-        />
+        <div className="sectionhead">
+          <div>
+            <div className="eyebrow">
+              PLAYERS
+            </div>
+
+            <div className="title">
+              PLAYERS
+            </div>
+
+            <div className="sub">
+              Players in {poolLabel(pool)}
+            </div>
+          </div>
+
+          {mode === 'admin' && (
+            <div
+              style={{
+                display: 'flex',
+                gap: '10px',
+                flexWrap: 'wrap'
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                style={{ display: 'none' }}
+                onChange={
+                  handlePlayerCSV
+                }
+              />
+
+              <button
+                className="btn primary"
+                onClick={openImportPicker}
+                disabled={importingPlayers}
+              >
+                {importingPlayers
+                  ? 'Importing…'
+                  : '📥 IMPORT PLAYERS'}
+              </button>
+            </div>
+          )}
+        </div>
 
         <div className="card">
+          {mode === 'admin' && (
+            <div
+              className="notice"
+              style={{
+                marginBottom: '16px'
+              }}
+            >
+              <b>Google Sheets import</b>
+              <br />
+
+              Export your Google Sheet as{' '}
+              <b>CSV</b> and upload it here.
+              <br />
+
+              Required columns:{' '}
+              <b>Roll Number</b> and{' '}
+              <b>Name</b>.
+              <br />
+
+              <span
+                style={{
+                  opacity: 0.8
+                }}
+              >
+                Re-importing a list containing
+                old + new players will not
+                create duplicate players.
+              </span>
+            </div>
+          )}
+
           <div className="notice">
             The selected pool is{' '}
             <b>{poolLabel(pool)}</b>.
@@ -1211,6 +1528,7 @@ function App() {
                 <th>Roll</th>
                 <th>Name</th>
                 <th>Status</th>
+
                 {mode === 'admin' && (
                   <th>Action</th>
                 )}
@@ -1220,11 +1538,17 @@ function App() {
             <tbody>
               {players.map(p => (
                 <tr key={p.id}>
-                  <td>{p.roll_number}</td>
+                  <td>
+                    {p.roll_number}
+                  </td>
 
-                  <td>{p.name}</td>
+                  <td>
+                    {p.name}
+                  </td>
 
-                  <td>{p.status}</td>
+                  <td>
+                    {p.status}
+                  </td>
 
                   {mode === 'admin' && (
                     <td>
@@ -1283,6 +1607,7 @@ function App() {
                 <th>Result</th>
                 <th>Team</th>
                 <th>Price</th>
+
                 {mode === 'admin' && (
                   <th>Action</th>
                 )}
@@ -1299,7 +1624,9 @@ function App() {
                     {x.player?.name}
                   </td>
 
-                  <td>{x.status}</td>
+                  <td>
+                    {x.status}
+                  </td>
 
                   <td>
                     {x.team?.name ||
@@ -1630,8 +1957,7 @@ function TeamDetails({
             {selectedTeam}{' '}
             {viewMode === 'current'
               ? `in ${poolLabel(pool)}`
-              : 'across any pool'}
-            .
+              : 'across any pool'}.
           </div>
         ) : (
           <table className="table">
