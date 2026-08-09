@@ -31,4 +31,3 @@ Import the GitHub repository as a Vite project. Add the same two environment var
 - SOLD deducts the winning price atomically from that team's balance.
 - Each of the 10 pools has an independent 150 EP balance for each of the five teams.
 - The public view updates through Supabase Realtime.
-Euphoria Auction deployment update
