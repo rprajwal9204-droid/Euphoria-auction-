@@ -58,18 +58,12 @@ function App() {
   /*
    * =========================================================
    * AUCTION RESULT ANNOUNCEMENT
-   *
-   * This is purely frontend state.
-   * It does NOT modify any database logic.
    * =========================================================
    */
+
   const [auctionAnnouncement, setAuctionAnnouncement] =
     useState(null)
 
-  /*
-   * Automatically remove the SOLD / UNSOLD announcement
-   * after exactly 5 seconds.
-   */
   useEffect(() => {
     if (!auctionAnnouncement) return
 
@@ -82,6 +76,11 @@ function App() {
 
   const teamMap = useMemo(
     () => Object.fromEntries(teams.map(t => [t.name, t])),
+    [teams]
+  )
+
+  const teamById = useMemo(
+    () => Object.fromEntries(teams.map(t => [t.id, t])),
     [teams]
   )
 
@@ -819,12 +818,21 @@ function App() {
       return
     }
 
-    /*
-     * Capture these BEFORE the RPC because the current player
-     * may disappear from auction_states after the sale.
-     */
     const soldPlayer = current.current_player
-    const soldTeam = current.leader_team
+
+    /*
+     * Resolve the team robustly.
+     *
+     * Sometimes the nested leader_team relation may not be
+     * populated. In that case use leader_team_id -> teams.
+     */
+    const soldTeam =
+      current.leader_team ||
+      teamById[current.leader_team_id] ||
+      teams.find(
+        t => t.id === current.leader_team_id
+      )
+
     const soldPrice = current.current_bid
 
     const { error } =
@@ -840,10 +848,6 @@ function App() {
       return
     }
 
-    /*
-     * Existing database sale is already complete.
-     * Now show the 5-second announcement.
-     */
     setAuctionAnnouncement({
       type: 'SOLD',
       playerName: soldPlayer?.name || 'Player',
@@ -866,10 +870,6 @@ function App() {
       return
     }
 
-    /*
-     * Capture the player before mark_unsold clears the
-     * current auction state.
-     */
     const unsoldPlayer = current.current_player
 
     const { error } =
@@ -988,6 +988,10 @@ function App() {
             current.current_player_id
         )
 
+      /*
+       * Remove any existing bids first so Manual SOLD starts
+       * from a clean state.
+       */
       for (const existing of existingBids) {
         const { error } =
           await supabase.rpc(
@@ -1005,24 +1009,61 @@ function App() {
       }
 
       /*
-       * Keep the existing Manual SOLD behaviour intact.
+       * IMPORTANT:
+       *
+       * manual_bid requires the FIRST bid to be exactly 3 EP.
+       *
+       * Therefore Manual SOLD must first create the valid
+       * opening 3 EP bid.
+       *
+       * If the requested sale price is greater than 3 EP,
+       * we then create the requested final bid.
+       *
+       * This fixes:
+       * "first bid must be exactly 3"
        */
-      const bidResult =
+      const openingBid =
         await supabase.rpc(
           'manual_bid',
           {
             p_pool_id: pool.id,
             p_team_id: team.id,
-            p_amount: amount
+            p_amount: 3
           }
         )
 
-      if (bidResult.error) {
-        notify(bidResult.error.message)
+      if (openingBid.error) {
+        notify(openingBid.error.message)
         await loadPool()
         return
       }
 
+      /*
+       * If Manual SOLD price is above 3 EP, create the
+       * final bid at the requested sale amount.
+       */
+      if (amount > 3) {
+        const finalBid =
+          await supabase.rpc(
+            'manual_bid',
+            {
+              p_pool_id: pool.id,
+              p_team_id: team.id,
+              p_amount: amount
+            }
+          )
+
+        if (finalBid.error) {
+          notify(finalBid.error.message)
+          await loadPool()
+          return
+        }
+      }
+
+      /*
+       * Now the selected team is the current leader and the
+       * normal SOLD RPC can complete the sale.
+       */
       const saleResult =
         await supabase.rpc(
           'sell_current_player',
@@ -1037,10 +1078,6 @@ function App() {
         return
       }
 
-      /*
-       * Show the same 5-second SOLD announcement
-       * for Manual SOLD.
-       */
       setAuctionAnnouncement({
         type: 'SOLD',
         playerName: player.name,
@@ -1288,6 +1325,34 @@ function App() {
             }
           )
       : []
+
+  /*
+   * Current bidder = team belonging to the latest bid.
+   *
+   * This is more reliable than relying only on
+   * current.leader_team because the realtime state can
+   * briefly arrive before its nested relation.
+   */
+  const currentBidder =
+    currentPlayerBids.length > 0
+      ? (
+          currentPlayerBids[
+            currentPlayerBids.length - 1
+          ].team?.name ||
+          teamById[
+            currentPlayerBids[
+              currentPlayerBids.length - 1
+            ].team_id
+          ]?.name ||
+          current?.leader_team?.name ||
+          teamById[current?.leader_team_id]?.name ||
+          null
+        )
+      : (
+          current?.leader_team?.name ||
+          teamById[current?.leader_team_id]?.name ||
+          null
+        )
 
   const displayedBidAmount =
     currentPlayerBids.length === 0
@@ -1732,15 +1797,45 @@ function App() {
                 <small> EP</small>
               </div>
 
+              {/* =================================================
+                  CURRENT BIDDER
+                  ================================================= */}
+
+              <div
+                style={{
+                  marginTop: '14px',
+                  fontSize: '12px',
+                  color: '#8d94a5',
+                  textTransform: 'uppercase',
+                  letterSpacing: '.18em'
+                }}
+              >
+                CURRENT BIDDER
+              </div>
+
+              <div
+                style={{
+                  marginTop: '5px',
+                  fontSize: 'clamp(24px,4vw,38px)',
+                  fontWeight: 950,
+                  minHeight: '44px'
+                }}
+              >
+                {currentBidder || '—'}
+              </div>
+
               <div
                 className={`leader ${
                   TEAM_COLORS[
-                    c?.leader_team?.name
+                    currentBidder
                   ] || ''
                 }`}
+                style={{
+                  marginTop: '12px'
+                }}
               >
-                {c?.leader_team?.name
-                  ? `${c.leader_team.name} • ${c.current_bid} EP`
+                {currentBidder
+                  ? `${currentBidder} • ${c.current_bid} EP`
                   : 'OPEN • BASE 3 EP'}
               </div>
             </div>
@@ -1853,6 +1948,7 @@ function App() {
                         }
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
+                            e.preventDefault()
                             startPlayerByRoll()
                           }
                         }}
@@ -1933,6 +2029,7 @@ function App() {
                               <div>
                                 <strong>
                                   {b.team?.name ||
+                                    teamById[b.team_id]?.name ||
                                     'Unknown Team'}
                                 </strong>
 
@@ -2015,11 +2112,6 @@ function App() {
           </section>
         </div>
 
-        {/*
-         * =====================================================
-         * 5-SECOND AUCTION RESULT SCREEN
-         * =====================================================
-         */}
         {auctionAnnouncement && (
           <AuctionAnnouncement
             announcement={auctionAnnouncement}
