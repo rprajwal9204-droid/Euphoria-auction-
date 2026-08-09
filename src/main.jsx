@@ -175,41 +175,15 @@ function App() {
         loadPool
       )
       .on(
-  'postgres_changes',
-  {
-    event: 'INSERT',
-    schema: 'public',
-    table: 'auction_results',
-    filter: `pool_id=eq.${pool.id}`
-  },
-  async payload => {
-    await loadPool()
-
-    const { data: result } = await supabase
-      .from('auction_results')
-      .select('*, player:players(*), team:teams(*)')
-      .eq('id', payload.new.id)
-      .single()
-
-    if (!result) return
-
-    if (result.status === 'SOLD') {
-      setAuctionAnnouncement({
-        type: 'SOLD',
-        playerName: result.player?.name || 'Player',
-        rollNumber: result.player?.roll_number || '—',
-        teamName: result.team?.name || 'Unknown Team',
-        price: result.final_price
-      })
-    } else if (result.status === 'UNSOLD') {
-      setAuctionAnnouncement({
-        type: 'UNSOLD',
-        playerName: result.player?.name || 'Player',
-        rollNumber: result.player?.roll_number || '—'
-      })
-    }
-  }
-)
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'players',
+          filter: `pool_id=eq.${pool.id}`
+        },
+        loadPool
+      )
       .on(
         'postgres_changes',
         {
