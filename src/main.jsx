@@ -31,6 +31,10 @@ function App() {
 
   const [selectedTeam, setSelectedTeam] = useState(null)
 
+  // FIX:
+  // This state MUST be at App level, not inside teamsPage().
+  const [teamViewMode, setTeamViewMode] = useState('all')
+
   const [session, setSession] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loginOpen, setLoginOpen] = useState(false)
@@ -241,16 +245,17 @@ function App() {
     setHistory(hist.data || [])
     setBids(bidData.data || [])
 
-    // Refresh the complete all-pools list as well.
-    const { data: completeHistory, error: completeError } =
-      await supabase
-        .from('auction_results')
-        .select(
-          '*, player:players(*), team:teams(*), pool:pools(*)'
-        )
-        .order('created_at', {
-          ascending: false
-        })
+    const {
+      data: completeHistory,
+      error: completeError
+    } = await supabase
+      .from('auction_results')
+      .select(
+        '*, player:players(*), team:teams(*), pool:pools(*)'
+      )
+      .order('created_at', {
+        ascending: false
+      })
 
     if (completeError) {
       notify(completeError.message)
@@ -341,9 +346,12 @@ function App() {
     }
 
     const { error } =
-      await supabase.rpc('sell_current_player', {
-        p_pool_id: pool.id
-      })
+      await supabase.rpc(
+        'sell_current_player',
+        {
+          p_pool_id: pool.id
+        }
+      )
 
     if (error) {
       notify(error.message)
@@ -360,9 +368,12 @@ function App() {
     }
 
     const { error } =
-      await supabase.rpc('mark_unsold', {
-        p_pool_id: pool.id
-      })
+      await supabase.rpc(
+        'mark_unsold',
+        {
+          p_pool_id: pool.id
+        }
+      )
 
     if (error) {
       notify(error.message)
@@ -379,9 +390,12 @@ function App() {
     }
 
     const { error } =
-      await supabase.rpc('relist_player', {
-        p_player_id: id
-      })
+      await supabase.rpc(
+        'relist_player',
+        {
+          p_player_id: id
+        }
+      )
 
     if (error) {
       notify(error.message)
@@ -406,9 +420,12 @@ function App() {
     setDeletingBid(id)
 
     const { error } =
-      await supabase.rpc('delete_bid', {
-        p_bid_id: id
-      })
+      await supabase.rpc(
+        'delete_bid',
+        {
+          p_bid_id: id
+        }
+      )
 
     setDeletingBid(null)
 
@@ -431,23 +448,24 @@ function App() {
       return
     }
 
-    const playerBids = bids
-      .filter(
-        b =>
-          b.player_id ===
-          current.current_player_id
-      )
-      .sort((a, b) => {
-        const difference =
-          new Date(a.created_at).getTime() -
-          new Date(b.created_at).getTime()
+    const playerBids =
+      bids
+        .filter(
+          b =>
+            b.player_id ===
+            current.current_player_id
+        )
+        .sort((a, b) => {
+          const difference =
+            new Date(a.created_at).getTime() -
+            new Date(b.created_at).getTime()
 
-        if (difference !== 0) {
-          return difference
-        }
+          if (difference !== 0) {
+            return difference
+          }
 
-        return Number(a.id) - Number(b.id)
-      })
+          return Number(a.id) - Number(b.id)
+        })
 
     const lastBid =
       playerBids[playerBids.length - 1]
@@ -506,6 +524,7 @@ function App() {
       notify(
         `Sale undone • ${result.final_price} EP refunded`
       )
+
       await loadPool()
     }
   }
@@ -552,9 +571,6 @@ function App() {
           })
       : []
 
-  /*
-   * CURRENT POOL TEAM SQUAD
-   */
   function currentPoolTeamPlayers(teamName) {
     if (!pool) return []
 
@@ -565,9 +581,6 @@ function App() {
     )
   }
 
-  /*
-   * ALL POOLS TEAM SQUAD
-   */
   function allPoolTeamPlayers(teamName) {
     return allHistory.filter(
       x =>
@@ -578,11 +591,21 @@ function App() {
 
   function openCurrentPoolTeam(teamName) {
     setSelectedTeam(teamName)
+
+    // When clicking from live auction,
+    // default to current pool.
+    setTeamViewMode('current')
+
     setPage('teams')
   }
 
   function openAllPoolsTeam(teamName) {
     setSelectedTeam(teamName)
+
+    // When clicking from Teams menu,
+    // default to all pools.
+    setTeamViewMode('all')
+
     setPage('teams')
   }
 
@@ -613,6 +636,7 @@ function App() {
             value={pool?.id || ''}
             onChange={e => {
               setSelectedTeam(null)
+
               setPool(
                 pools.find(
                   x =>
@@ -690,9 +714,7 @@ function App() {
                     >
                       <span
                         className={
-                          TEAM_COLORS[
-                            name
-                          ]
+                          TEAM_COLORS[name]
                         }
                       >
                         {name}
@@ -756,7 +778,8 @@ function App() {
 
                     <div className="teamPool">
                       {c.current_player.name}
-                      {' • '}Bid History
+                      {' • '}
+                      Bid History
                     </div>
 
                     {currentPlayerBids.length ===
@@ -902,17 +925,7 @@ function App() {
 
   function teamsPage() {
     /*
-     * TEAM SELECTED
-     *
-     * This view is reached either from:
-     * 1. A team card on the current auction pool
-     * 2. The Teams main menu
-     *
-     * When opened from the auction page, the user
-     * expects the current pool. When opened from
-     * the Teams menu, the user expects all pools.
-     *
-     * We therefore show a clear toggle.
+     * SELECTED TEAM
      */
     if (selectedTeam) {
       const currentPoolPlayers =
@@ -925,11 +938,8 @@ function App() {
           selectedTeam
         )
 
-      const [viewMode, setViewMode] =
-        useState('all')
-
       const displayedPlayers =
-        viewMode === 'current'
+        teamViewMode === 'current'
           ? currentPoolPlayers
           : allPlayers
 
@@ -946,7 +956,7 @@ function App() {
               </div>
 
               <div className="sub">
-                {viewMode ===
+                {teamViewMode ===
                 'current'
                   ? `Players from ${poolLabel(
                       pool
@@ -957,9 +967,10 @@ function App() {
 
             <button
               className="btn"
-              onClick={() =>
+              onClick={() => {
                 setSelectedTeam(null)
-              }
+                setTeamViewMode('all')
+              }}
             >
               ← All Teams
             </button>
@@ -973,12 +984,13 @@ function App() {
           >
             <button
               className={
-                viewMode === 'current'
+                teamViewMode ===
+                'current'
                   ? 'btn primary'
                   : 'btn'
               }
               onClick={() =>
-                setViewMode('current')
+                setTeamViewMode('current')
               }
             >
               Current Pool
@@ -986,12 +998,12 @@ function App() {
 
             <button
               className={
-                viewMode === 'all'
+                teamViewMode === 'all'
                   ? 'btn primary'
                   : 'btn'
               }
               onClick={() =>
-                setViewMode('all')
+                setTeamViewMode('all')
               }
             >
               All Pools
@@ -1001,7 +1013,7 @@ function App() {
           <div className="card">
             <div className="eyebrow">
               {selectedTeam} •{' '}
-              {viewMode ===
+              {teamViewMode ===
               'current'
                 ? poolLabel(pool)
                 : 'ALL POOLS'}
@@ -1027,7 +1039,7 @@ function App() {
               <div className="notice">
                 No players purchased by{' '}
                 {selectedTeam}{' '}
-                {viewMode ===
+                {teamViewMode ===
                 'current'
                   ? `in ${poolLabel(pool)}`
                   : 'across any pool'}
@@ -1037,7 +1049,7 @@ function App() {
               <table className="table">
                 <thead>
                   <tr>
-                    {viewMode ===
+                    {teamViewMode ===
                       'all' && (
                       <th>Pool</th>
                     )}
@@ -1051,7 +1063,7 @@ function App() {
                   {displayedPlayers.map(
                     x => (
                       <tr key={x.id}>
-                        {viewMode ===
+                        {teamViewMode ===
                           'all' && (
                           <td>
                             {x.pool
@@ -1084,10 +1096,6 @@ function App() {
 
     /*
      * MAIN TEAMS PAGE
-     *
-     * Each team is clickable.
-     * Clicking it opens ALL POOLS for
-     * that team.
      */
     return (
       <>
@@ -1211,6 +1219,9 @@ function App() {
                 <th>Result</th>
                 <th>Team</th>
                 <th>Price</th>
+                {mode === 'admin' && (
+                  <th>Action</th>
+                )}
               </tr>
             </thead>
 
@@ -1236,6 +1247,31 @@ function App() {
                       ? `${x.final_price} EP`
                       : '—'}
                   </td>
+
+                  {mode === 'admin' && (
+                    <td>
+                      {x.status ===
+                        'SOLD' && (
+                        <button
+                          className="danger"
+                          disabled={
+                            undoingSale ===
+                            x.id
+                          }
+                          onClick={() =>
+                            undoSoldPlayer(
+                              x.id
+                            )
+                          }
+                        >
+                          {undoingSale ===
+                          x.id
+                            ? 'Undoing…'
+                            : '↩ Undo Sale'}
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -1361,6 +1397,7 @@ function App() {
               }
               onClick={() => {
                 setSelectedTeam(null)
+                setTeamViewMode('all')
                 setPage('teams')
               }}
             >
