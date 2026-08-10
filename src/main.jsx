@@ -4,11 +4,11 @@ import { supabase, supabaseConfigured } from './lib/supabase'
 import './styles.css'
 
 const TEAM_COLORS = {
-  Falcons: 'blue',
-  Eagles: 'yellow',
-  Thunderbirds: 'purple',
-  Griffins: 'red',
-  Phoenix: 'orange'
+  'Akshaya & Prajwal': 'blue',
+  'Gayatri & Yashas': 'yellow',
+  'Vaishnavi & Ganesh': 'purple',
+  'Likitha & Saketh': 'red',
+  'Chinmayi & Mukesh': 'orange'
 }
 
 const TEAM_NAMES = Object.keys(TEAM_COLORS)
