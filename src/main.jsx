@@ -55,26 +55,8 @@ function App() {
   const [manualSoldPoints, setManualSoldPoints] = useState('')
   const [manualSelling, setManualSelling] = useState(false)
 
-  /*
-   * =========================================================
-   * AUCTION RESULT ANNOUNCEMENT
-   * =========================================================
-   */
-
   const [auctionAnnouncement, setAuctionAnnouncement] =
     useState(null)
-
-  /*
-   * =========================================================
-   * AUCTION ANNOUNCEMENT SYNC
-   *
-   * These refs allow every connected browser to detect a
-   * newly-created auction result through Supabase realtime.
-   *
-   * Existing results on initial page load are remembered but
-   * are NOT displayed as announcements.
-   * =========================================================
-   */
 
   const seenAuctionResultIds = useRef(new Set())
   const auctionHistoryInitialized = useRef(false)
@@ -151,12 +133,6 @@ function App() {
   useEffect(() => {
     if (!pool || !supabaseConfigured) return
 
-    /*
-     * Reset the result-tracking state when switching pools.
-     *
-     * This prevents results from one pool being compared
-     * against results from another pool.
-     */
     seenAuctionResultIds.current = new Set()
     auctionHistoryInitialized.current = false
 
@@ -317,19 +293,6 @@ function App() {
     setPlayers(ps.data || [])
     setHistory(hist.data || [])
     setBids(bidData.data || [])
-
-    /*
-     * =========================================================
-     * PUBLIC AUCTION ANNOUNCEMENT SYNC
-     *
-     * On the first load, remember all existing results.
-     * This prevents an old SOLD/UNSOLD result from appearing
-     * when somebody first opens the website.
-     *
-     * After initialization, only newly-created results are
-     * displayed as announcements.
-     * =========================================================
-     */
 
     if (!auctionHistoryInitialized.current) {
       ;(hist.data || []).forEach(result => {
@@ -856,43 +819,104 @@ function App() {
     await loadPool()
   }
 
-  async function bid(teamName) {
-    const team = teamMap[teamName]
+  /*
+   * =========================================================
+   * FIXED BID FUNCTION
+   * =========================================================
+   */
 
-    if (
-      !team ||
-      !current?.current_player_id ||
-      auctionAnnouncement
-    ) {
+  async function bid(teamName) {
+    if (!session) {
+      setLoginOpen(true)
       return
     }
 
-    const playerBids =
-      bids.filter(
+    if (auctionAnnouncement) {
+      notify('Please wait for the auction result announcement')
+      return
+    }
+
+    if (!pool) {
+      notify('No pool selected')
+      return
+    }
+
+    if (!current?.current_player_id) {
+      notify('No player is currently in the auction')
+      return
+    }
+
+    const team = teams.find(
+      t =>
+        String(t.name).trim().toLowerCase() ===
+        String(teamName).trim().toLowerCase()
+    )
+
+    if (!team) {
+      notify(`Team "${teamName}" was not found`)
+      return
+    }
+
+    const playerBids = bids
+      .filter(
         b =>
-          b.player_id ===
-          current.current_player_id
+          String(b.player_id) ===
+          String(current.current_player_id)
       )
+      .sort((a, b) => {
+        const d =
+          new Date(a.created_at).getTime() -
+          new Date(b.created_at).getTime()
+
+        if (d !== 0) return d
+
+        return Number(a.id) - Number(b.id)
+      })
 
     const amount =
       playerBids.length === 0
         ? 3
-        : nextBid(current.current_bid)
+        : nextBid(
+            Number(
+              playerBids[playerBids.length - 1].amount
+            )
+          )
 
-    const { error } =
-      await supabase.rpc(
-        'manual_bid',
-        {
-          p_pool_id: pool.id,
-          p_team_id: team.id,
-          p_amount: amount
-        }
+    const balance = Number(
+      selectedBalance(teamName)
+    )
+
+    if (balance < amount) {
+      notify(
+        `${teamName} only has ${balance} EP remaining`
       )
+      return
+    }
 
-    if (error) {
-      notify(error.message)
-    } else {
+    try {
+      const { error } =
+        await supabase.rpc(
+          'manual_bid',
+          {
+            p_pool_id: pool.id,
+            p_team_id: team.id,
+            p_amount: amount
+          }
+        )
+
+      if (error) {
+        notify(`Bid failed: ${error.message}`)
+        return
+      }
+
+      notify(`${teamName} bid ${amount} EP`)
+
       await loadPool()
+    } catch (error) {
+      notify(
+        error?.message ||
+          'Something went wrong while placing the bid'
+      )
     }
   }
 
@@ -1894,7 +1918,13 @@ function App() {
                         selectedBalance(name) <
                           displayedBidAmount
                       }
-                      onClick={() => bid(name)}
+                      onClick={() => {
+                        console.log(
+                          'BID CLICKED:',
+                          name
+                        )
+                        bid(name)
+                      }}
                     >
                       <span
                         className={
@@ -1949,11 +1979,6 @@ function App() {
                   </button>
                 </div>
 
-                {/* KEYBOARD FIX:
-                    PlayerManagement is intentionally called as
-                    a render function instead of <PlayerManagement />.
-                    This prevents the input from being unmounted
-                    after every keystroke. */}
                 {PlayerManagement()}
 
                 {rollOpen && (
